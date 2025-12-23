@@ -3,24 +3,24 @@
 
 /**
  * KaiStatus — Atlantean μpulse Bar
- * v5.2 — FULL KKS-1.0 COHERENCE (pulse + beat + step + day + countdown)
+ * v5.4 — ALWAYS-LIVE / NO-RELOAD / NO-GLITCH COUNTDOWN (mobile-safe)
  *
- * ✅ FIX (Beat/Step correctness):
- * Beat + Step are derived from canonical μpulses since Genesis (SigilModal parity),
- * not from any external ticker shape that may be in mismatched units.
+ * ✅ “Never stuck” guarantee (as far as the platform allows):
+ * - Uses a *dual* visual scheduler:
+ *    1) requestAnimationFrame (when available)
+ *    2) setInterval(33ms) fallback (covers iOS Safari “rAF pauses during scroll” cases)
+ * - Truth resnap every 250ms so interpolation can’t drift.
+ * - Imperative DOM updates for countdown text + progress (no React 60fps renders).
+ * - React state publishes only low-rate for aria/title + dial percent.
  *
- * ✅ FIX (Next pulse countdown correctness):
- * Countdown is derived from μpulse “now” → epoch-ms (via GENESIS_TS/PULSE_MS),
- * then aligned to the NEXT pulse boundary (exact 5.236…s cadence).
- * No fast/incorrect countdown loops.
+ * ✅ Still KKS-1.0 coherent:
+ * - Beat + Step derived from canonical μpulses since Genesis (SigilModal parity)
+ * - Next pulse boundary aligned to 5.236…s cadence via μpulse → boundary
+ * - Day chakra follows weekday (Solhara..Kaelith)
  *
- * ✅ FIX (Day chakra correctness):
- * Day chakra follows weekday (Solhara..Kaelith), not day-of-month segmentation.
- * - Verdari → Heart (green)
- * - Sonari  → Throat (blue)
- * - Kaelith → Crown ("Krown")
- *
- * Keeps UI + portal dial behavior unchanged.
+ * Notes:
+ * - `performance.now()` is used ONLY for visual interpolation between truth samples.
+ *   Truth still comes from `kairosEpochNow()` (μpulse-space).
  */
 
 import * as React from "react";
@@ -43,11 +43,11 @@ import "./KaiStatus.css";
    Pulse constants (Golden Breath)
 ───────────────────────────────────────────────────────────── */
 
-const DEFAULT_PULSE_DUR_S = PULSE_MS / 1000; // exact source of truth
+const DEFAULT_PULSE_DUR_S = PULSE_MS / 1000;
 
-const ONE_PULSE_MICRO = 1_000_000n; // 1 pulse = 1e6 μpulses
-const PULSES_PER_STEP_MICRO = 11_000_000n; // 11 pulses/step * 1e6
-const MU_PER_BEAT_EXACT = (N_DAY_MICRO + 18n) / 36n; // round(N_DAY_MICRO/36) (SigilModal parity)
+const ONE_PULSE_MICRO = 1_000_000n;
+const PULSES_PER_STEP_MICRO = 11_000_000n;
+const MU_PER_BEAT_EXACT = (N_DAY_MICRO + 18n) / 36n;
 
 function clamp01(n: number): number {
   return n < 0 ? 0 : n > 1 ? 1 : n;
@@ -55,11 +55,6 @@ function clamp01(n: number): number {
 
 /**
  * Reads --pulse-dur from CSS and returns SECONDS.
- * Accepts:
- *  - "5236.0679ms"  -> 5.2360679
- *  - "5.2360679s"   -> 5.2360679
- *  - "5.2360679"    -> assumes seconds
- *  - "5236.0679"    -> assumes ms (heuristic)
  */
 function readPulseDurSeconds(el: HTMLElement | null): number {
   if (!el) return DEFAULT_PULSE_DUR_S;
@@ -74,9 +69,7 @@ function readPulseDurSeconds(el: HTMLElement | null): number {
   if (lower.endsWith("ms")) return v / 1000;
   if (lower.endsWith("s")) return v;
 
-  // Heuristic: if it's huge, it was almost certainly ms.
   if (v > 1000) return v / 1000;
-
   return v;
 }
 
@@ -152,13 +145,11 @@ function arkFromBeat(beat: number): ArkName {
    KKS-1.0 BigInt helpers
 ───────────────────────────────────────────────────────────── */
 
-/** Euclidean mod (always 0..m-1) */
 const modE = (a: bigint, m: bigint): bigint => {
   const r = a % m;
   return r >= 0n ? r : r + m;
 };
 
-/** Euclidean floor division (toward −∞) */
 const floorDivE = (a: bigint, d: bigint): bigint => {
   if (d === 0n) throw new Error("Division by zero");
   const q = a / d;
@@ -177,29 +168,19 @@ const toSafeNumber = (x: bigint): number => {
 const absBI = (x: bigint): bigint => (x < 0n ? -x : x);
 
 /* ─────────────────────────────────────────────────────────────
-   ✅ Canonical μpulse normalization (SigilModal-aligned robustness)
-   kairosEpochNow() SHOULD return μpulses since Genesis (BigInt).
-   If a build accidentally routes epoch-ms or epoch-μs here, normalize safely.
+   ✅ μpulse normalization safety
 ───────────────────────────────────────────────────────────── */
 
 const GENESIS_MS_BI = BigInt(GENESIS_TS);
-
-// “close to genesis in ms” window (≈ ±5.8 days) — strong signal for epoch-ms misuse
 const NEAR_GENESIS_MS_WINDOW = 500_000_000_000n;
 
 function normalizeKaiEpochRawToMicroPulses(raw: bigint): bigint {
-  // If it looks like epoch-μs, convert to ms first.
   if (raw >= 100_000_000_000_000n) {
-    // 1e14+ cannot be μpulses since 2024-genesis without being absurdly far; treat as epoch-μs.
     return microPulsesSinceGenesis(raw / 1000n);
   }
-
-  // If it is “near” GENESIS_TS in ms-space, treat as epoch-ms.
   if (absBI(raw - GENESIS_MS_BI) <= NEAR_GENESIS_MS_WINDOW) {
     return microPulsesSinceGenesis(raw);
   }
-
-  // Default: assume correct μpulses-since-Genesis.
   return raw;
 }
 
@@ -220,27 +201,26 @@ function beatStepFromMicroTotal(pμ_total: bigint): { beat: number; step: number
 }
 
 function harmonicDayFromMicroTotal(pμ_total: bigint): string {
-  const dayIdx = floorDivE(pμ_total, N_DAY_MICRO); // days since genesis
-  const idx = toSafeNumber(modE(dayIdx, 6n)); // 0..5
+  const dayIdx = floorDivE(pμ_total, N_DAY_MICRO);
+  const idx = toSafeNumber(modE(dayIdx, 6n));
   const WEEKDAY = ["Solhara", "Aquaris", "Flamora", "Verdari", "Sonari", "Kaelith"] as const;
   return WEEKDAY[Math.max(0, Math.min(5, idx))] ?? "Solhara";
 }
 
 function kaiDMYFromMicroKKS(pμ_total: bigint): { day: number; month: number; year: number } {
-  const dayIdx = floorDivE(pμ_total, N_DAY_MICRO); // days since genesis
-  const monthIdx = floorDivE(dayIdx, BigInt(DAYS_PER_MONTH)); // months since genesis
-  const yearIdx = floorDivE(dayIdx, BigInt(DAYS_PER_YEAR)); // years since genesis
+  const dayIdx = floorDivE(pμ_total, N_DAY_MICRO);
+  const monthIdx = floorDivE(dayIdx, BigInt(DAYS_PER_MONTH));
+  const yearIdx = floorDivE(dayIdx, BigInt(DAYS_PER_YEAR));
 
-  const dayOfMonth = toSafeNumber(modE(dayIdx, BigInt(DAYS_PER_MONTH))) + 1; // 1..42
-  const month = toSafeNumber(modE(monthIdx, BigInt(MONTHS_PER_YEAR))) + 1; // 1..8
-  const year = toSafeNumber(yearIdx); // 0..
+  const dayOfMonth = toSafeNumber(modE(dayIdx, BigInt(DAYS_PER_MONTH))) + 1;
+  const month = toSafeNumber(modE(monthIdx, BigInt(MONTHS_PER_YEAR))) + 1;
+  const year = toSafeNumber(yearIdx);
 
   return { day: dayOfMonth, month, year };
 }
 
 /* ─────────────────────────────────────────────────────────────
-   ✅ Countdown: μpulse “now” → aligned NEXT boundary (5.236s)
-   (SigilModal parity: boundary timestamps only)
+   ✅ Countdown math
 ───────────────────────────────────────────────────────────── */
 
 function epochMsFromMicroPulses(pμ: bigint): number {
@@ -251,13 +231,13 @@ function epochMsFromMicroPulses(pμ: bigint): number {
   const pμN = Number(pμ);
   if (!Number.isFinite(pμN)) return GENESIS_TS;
 
-  const deltaPulses = pμN / 1_000_000; // pulses since Genesis (float)
+  const deltaPulses = pμN / 1_000_000;
   const msUTC = GENESIS_TS + deltaPulses * PULSE_MS;
   return Number.isFinite(msUTC) ? msUTC : GENESIS_TS;
 }
 
 function computeNextBoundaryFromMicro(pμNow: bigint): number {
-  const pulseIdx = floorDivE(pμNow, ONE_PULSE_MICRO); // current pulse (floor)
+  const pulseIdx = floorDivE(pμNow, ONE_PULSE_MICRO);
   const nextPulseIdx = pulseIdx + 1n;
 
   const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
@@ -266,116 +246,229 @@ function computeNextBoundaryFromMicro(pμNow: bigint): number {
   return GENESIS_TS + Number(nextPulseIdx) * PULSE_MS;
 }
 
-type CountdownSnap = {
-  secsLeft: number | null;
-  pμNow: bigint;
-};
+const ZEROS_6 = "000000";
 
-function useGoldenBreathCountdown(active: boolean): CountdownSnap {
-  const initRaw = React.useMemo(() => {
+function pad6(n: number): string {
+  if (n <= 0) return ZEROS_6;
+  if (n >= 999999) return "999999";
+  const s = String(n);
+  return s.length >= 6 ? s : ZEROS_6.slice(0, 6 - s.length) + s;
+}
+
+function formatSecsLeft6Text(diffMs: number): { text: string; secs: number } {
+  const safeMs = Number.isFinite(diffMs) ? Math.max(0, diffMs) : 0;
+  const diffUs = Math.floor(safeMs * 1000);
+  const whole = Math.floor(diffUs / 1_000_000);
+  const frac = diffUs - whole * 1_000_000;
+  return { text: `${whole}.${pad6(frac)}`, secs: diffUs / 1_000_000 };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ✅ Pulse snap (React updates only when pulse changes)
+───────────────────────────────────────────────────────────── */
+
+function usePulseSnap(active: boolean): bigint {
+  const [pμSnap, setPμSnap] = React.useState<bigint>(() => {
     if (typeof window === "undefined") return 0n;
     return normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
-  }, []);
-
-  const pμRef = React.useRef<bigint>(initRaw);
-
-  const [secsLeft, setSecsLeft] = React.useState<number>(() => {
-    if (typeof window === "undefined") return DEFAULT_PULSE_DUR_S;
-    const msNow = epochMsFromMicroPulses(initRaw);
-    const next = computeNextBoundaryFromMicro(initRaw);
-    return Math.max(0, (next - msNow) / 1000);
   });
 
-  const nextRef = React.useRef<number>(0);
-  const rafRef = React.useRef<number | null>(null);
-  const intRef = React.useRef<number | null>(null);
+  const lastPulseIdxRef = React.useRef<bigint>(floorDivE(pμSnap, ONE_PULSE_MICRO));
 
   React.useEffect(() => {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    if (intRef.current !== null) {
-      window.clearInterval(intRef.current);
-      intRef.current = null;
-    }
-
     if (!active) return;
 
-    const snap0 = normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
-    pμRef.current = snap0;
-    nextRef.current = computeNextBoundaryFromMicro(snap0);
-
-    const tick = (): void => {
+    const sample = (): void => {
       const pμ = normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
-      pμRef.current = pμ;
-
-      const nowMs = epochMsFromMicroPulses(pμ);
-
-      if (nowMs >= nextRef.current) {
-        const missed = Math.floor((nowMs - nextRef.current) / PULSE_MS) + 1;
-        nextRef.current += missed * PULSE_MS;
-      }
-
-      const diffMs = Math.max(0, nextRef.current - nowMs);
-      setSecsLeft(diffMs / 1000);
-
-      rafRef.current = requestAnimationFrame(tick);
-    };
-
-    rafRef.current = requestAnimationFrame(tick);
-
-    const onVis = (): void => {
-      if (document.visibilityState === "hidden") {
-        if (rafRef.current !== null) {
-          cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-        if (intRef.current === null) {
-          intRef.current = window.setInterval(() => {
-            const pμ = normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
-            pμRef.current = pμ;
-
-            const nowMs = epochMsFromMicroPulses(pμ);
-
-            if (nowMs >= nextRef.current) {
-              const missed = Math.floor((nowMs - nextRef.current) / PULSE_MS) + 1;
-              nextRef.current += missed * PULSE_MS;
-            }
-
-            setSecsLeft(Math.max(0, (nextRef.current - nowMs) / 1000));
-          }, 33);
-        }
-      } else {
-        if (intRef.current !== null) {
-          window.clearInterval(intRef.current);
-          intRef.current = null;
-        }
-        if (rafRef.current !== null) {
-          cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-
-        const pμ = normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
-        pμRef.current = pμ;
-        nextRef.current = computeNextBoundaryFromMicro(pμ);
-
-        rafRef.current = requestAnimationFrame(tick);
+      const pulseIdx = floorDivE(pμ, ONE_PULSE_MICRO);
+      if (pulseIdx !== lastPulseIdxRef.current) {
+        lastPulseIdxRef.current = pulseIdx;
+        setPμSnap(pμ);
       }
     };
 
+    sample();
+
+    const id = window.setInterval(sample, 125);
+    const onVis = (): void => sample();
     document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pageshow", onVis);
+    window.addEventListener("focus", onVis);
 
     return () => {
+      window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-      if (intRef.current !== null) window.clearInterval(intRef.current);
-      rafRef.current = null;
-      intRef.current = null;
+      window.removeEventListener("pageshow", onVis);
+      window.removeEventListener("focus", onVis);
     };
   }, [active]);
 
-  return { secsLeft: active ? secsLeft : null, pμNow: pμRef.current };
+  return pμSnap;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ✅ Smooth animator (always-live; rAF + interval fallback)
+───────────────────────────────────────────────────────────── */
+
+type SmoothAnimState = {
+  secsLeft: number | null; // low-rate for aria/title
+  progress: number; // low-rate for dial percent
+};
+
+type SmoothAnimOpts = {
+  active: boolean;
+  rootRef: React.RefObject<HTMLElement | null>;
+  numRef: React.RefObject<HTMLSpanElement | null>;
+  pulseDurSec: number;
+  dialOpen: boolean;
+  onWrap?: () => void;
+};
+
+function useSmoothCountdownAnimator(opts: SmoothAnimOpts): SmoothAnimState {
+  const { active, rootRef, numRef, pulseDurSec, dialOpen, onWrap } = opts;
+
+  const [state, setState] = React.useState<SmoothAnimState>(() => ({
+    secsLeft: active ? DEFAULT_PULSE_DUR_S : null,
+    progress: 0,
+  }));
+
+  const rafRef = React.useRef<number | null>(null);
+  const visIntervalRef = React.useRef<number | null>(null);
+  const truthIntervalRef = React.useRef<number | null>(null);
+
+  const snapNowMsRef = React.useRef<number>(GENESIS_TS);
+  const snapPerfRef = React.useRef<number>(0);
+  const nextBoundaryMsRef = React.useRef<number>(GENESIS_TS);
+
+  const lastTickPerfRef = React.useRef<number>(-1);
+  const lastPublishPerfRef = React.useRef<number>(0);
+
+  const lastTextRef = React.useRef<string>("—");
+  const lastProgRef = React.useRef<number>(-1);
+
+  const perfNow = (): number => (typeof performance !== "undefined" ? performance.now() : 0);
+
+  const resnapTruth = React.useCallback((): void => {
+    const pμ = normalizeKaiEpochRawToMicroPulses(kairosEpochNow());
+    snapNowMsRef.current = epochMsFromMicroPulses(pμ);
+    snapPerfRef.current = perfNow();
+    nextBoundaryMsRef.current = computeNextBoundaryFromMicro(pμ);
+  }, []);
+
+  React.useEffect(() => {
+    // cleanup any previous loops
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    if (visIntervalRef.current !== null) window.clearInterval(visIntervalRef.current);
+    if (truthIntervalRef.current !== null) window.clearInterval(truthIntervalRef.current);
+    rafRef.current = null;
+    visIntervalRef.current = null;
+    truthIntervalRef.current = null;
+
+    if (!active) {
+      setState({ secsLeft: null, progress: 0 });
+      return;
+    }
+
+    resnapTruth();
+
+    const publishEveryMs = dialOpen ? 100 : 250; // dial needs smoother percent; otherwise low-rate
+    const tickMinGapMs = 8; // prevents double-exec when rAF + interval collide
+
+    const tick = (forcePublish: boolean): void => {
+      const pNow = perfNow();
+      if (lastTickPerfRef.current >= 0 && pNow - lastTickPerfRef.current < tickMinGapMs) return;
+      lastTickPerfRef.current = pNow;
+
+      const estNowMs = snapNowMsRef.current + (pNow - snapPerfRef.current);
+
+      let wrapped = false;
+      if (estNowMs >= nextBoundaryMsRef.current) {
+        const missed = Math.floor((estNowMs - nextBoundaryMsRef.current) / PULSE_MS) + 1;
+        nextBoundaryMsRef.current += missed * PULSE_MS;
+        wrapped = true;
+      }
+
+      const diffMs = Math.max(0, nextBoundaryMsRef.current - estNowMs);
+      const { text, secs } = formatSecsLeft6Text(diffMs);
+
+      const denom = Math.max(0.000001, pulseDurSec);
+      const prog = clamp01(1 - secs / denom);
+
+      // Imperative progress update (cheap if CSS uses transform)
+      const rootEl = rootRef.current;
+      if (rootEl) {
+        // Avoid spamming identical strings
+        if (prog !== lastProgRef.current) {
+          lastProgRef.current = prog;
+          rootEl.style.setProperty("--kai-progress", String(prog));
+        }
+      }
+
+      // Imperative countdown number update (30Hz+; avoids React renders)
+      const numEl = numRef.current;
+      if (numEl && text !== lastTextRef.current) {
+        lastTextRef.current = text;
+        numEl.textContent = text;
+      }
+
+      const shouldPublish = forcePublish || pNow - lastPublishPerfRef.current >= publishEveryMs;
+      if (shouldPublish) {
+        lastPublishPerfRef.current = pNow;
+        setState({ secsLeft: secs, progress: prog });
+      }
+
+      if (wrapped) {
+        // Hard re-anchor on boundary to prevent any visible “jump”
+        resnapTruth();
+        if (onWrap) onWrap();
+      }
+    };
+
+    // Prime immediately so UI is correct on first paint (no “jump from 0”)
+    tick(true);
+
+    const rafLoop = (): void => {
+      tick(false);
+      rafRef.current = requestAnimationFrame(rafLoop);
+    };
+
+    // rAF for maximum smoothness when allowed
+    rafRef.current = requestAnimationFrame(rafLoop);
+
+    // Interval fallback keeps updating even when rAF is paused (e.g., iOS scroll)
+    visIntervalRef.current = window.setInterval(() => tick(false), 33);
+
+    // Periodic truth resnap prevents drift under long main-thread stalls
+    truthIntervalRef.current = window.setInterval(() => {
+      resnapTruth();
+      tick(true);
+    }, 250);
+
+    const onVis = (): void => {
+      resnapTruth();
+      tick(true);
+    };
+
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    window.addEventListener("pageshow", onVis);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+      window.removeEventListener("pageshow", onVis);
+
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      if (visIntervalRef.current !== null) window.clearInterval(visIntervalRef.current);
+      if (truthIntervalRef.current !== null) window.clearInterval(truthIntervalRef.current);
+
+      rafRef.current = null;
+      visIntervalRef.current = null;
+      truthIntervalRef.current = null;
+    };
+  }, [active, dialOpen, pulseDurSec, onWrap, resnapTruth, rootRef, numRef]);
+
+  return state;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -422,7 +515,6 @@ function chakraFromMonth(month: number): ChakraName {
   return CHAKRA_SEQ[idx] ?? "Root";
 }
 
-/* ✅ weekday → chakra (Verdari/Heart, Sonari/Throat, Kaelith/Crown) */
 const WEEKDAY_CHAKRA: Readonly<Record<string, ChakraName>> = {
   solhara: "Root",
   aquaris: "Sacral",
@@ -430,7 +522,7 @@ const WEEKDAY_CHAKRA: Readonly<Record<string, ChakraName>> = {
   verdari: "Heart",
   sonari: "Throat",
   kaelith: "Crown",
-  caelith: "Crown", // alias safety
+  caelith: "Crown",
 };
 
 function chakraFromHarmonicDay(harmonicDay: unknown, fallbackDayOfMonth: number): ChakraName {
@@ -450,7 +542,6 @@ function chakraFromHarmonicDay(harmonicDay: unknown, fallbackDayOfMonth: number)
   return chakraFromDayOfMonth(fallbackDayOfMonth);
 }
 
-/** Month names (8). */
 const KAI_MONTH_NAMES: readonly string[] = [
   "Aethon",
   "Virelai",
@@ -468,7 +559,6 @@ function monthNameFromIndex(month: number): string {
   return KAI_MONTH_NAMES[idx] ?? `Month ${Math.max(1, m)}`;
 }
 
-/** Ark → Chakra color mapping (Ignite MUST be Root/red). */
 const ARK_CHAKRA: Readonly<Record<ArkName, ChakraName>> = {
   Ignite: "Root",
   Integrate: "Sacral",
@@ -479,7 +569,6 @@ const ARK_CHAKRA: Readonly<Record<ArkName, ChakraName>> = {
 };
 
 type KaiStatusVars = React.CSSProperties & {
-  ["--kai-progress"]?: number;
   ["--kai-ui-scale"]?: number;
 };
 
@@ -507,10 +596,12 @@ type KaiKlockProps = {
 const KaiKlock = KaiKlockRaw as unknown as React.ComponentType<KaiKlockProps>;
 
 export function KaiStatus(): React.JSX.Element {
-  // ✅ canonical μpulse “now” + exact countdown
-  const { secsLeft, pμNow } = useGoldenBreathCountdown(true);
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const countdownNumRef = React.useRef<HTMLSpanElement | null>(null);
 
-  // Derive ALL displayed Kai coordinates from μpulses (parity with SigilModal)
+  // μpulse snap updates on pulse boundary (no reload needed; always live)
+  const pμNow = usePulseSnap(true);
+
   const pulseNum = React.useMemo(() => kaiPulseFromMicro(pμNow), [pμNow]);
   const { beat: beatNum, step: stepNum } = React.useMemo(() => beatStepFromMicroTotal(pμNow), [pμNow]);
   const dmy = React.useMemo(() => kaiDMYFromMicroKKS(pμNow), [pμNow]);
@@ -521,12 +612,9 @@ export function KaiStatus(): React.JSX.Element {
   const arkFull: ArkName = arkFromBeat(beatNum);
   const arkChakra: ChakraName = ARK_CHAKRA[arkFull] ?? "Heart";
 
-  const rootRef = React.useRef<HTMLDivElement | null>(null);
   const width = useElementWidth(rootRef);
-
   const layout: LayoutMode = layoutForWidth(width);
   const bottomMode: BottomMode = bottomModeFor(layout);
-
   const pulseOnTop = layout === "wide" || layout === "tight";
 
   const [pulseDur, setPulseDur] = React.useState<number>(DEFAULT_PULSE_DUR_S);
@@ -534,61 +622,39 @@ export function KaiStatus(): React.JSX.Element {
     setPulseDur(readPulseDurSeconds(rootRef.current));
   }, [pulseNum]);
 
-  // Boundary flash when countdown wraps (0 → dur)
-  const [flash, setFlash] = React.useState<boolean>(false);
-  const prevAnchorRef = React.useRef<number | null>(null);
-
-  React.useEffect(() => {
-    const prev = prevAnchorRef.current;
-    prevAnchorRef.current = secsLeft;
-
-    if (prev != null && secsLeft != null && secsLeft > prev + 0.25) {
-      setFlash(true);
-      const t = window.setTimeout(() => setFlash(false), 180);
-      return () => window.clearTimeout(t);
-    }
-    return;
-  }, [secsLeft]);
-
-  const progress = React.useMemo<number>(() => {
-    if (secsLeft == null) return 0;
-    return clamp01(1 - secsLeft / pulseDur);
-  }, [secsLeft, pulseDur]);
-
-  const secsTextFull = secsLeft !== null ? secsLeft.toFixed(6) : "—";
-  const secsText = secsLeft !== null ? secsLeft.toFixed(6) : "—";
-
-  const dayChakra = React.useMemo<ChakraName>(
-    () => chakraFromHarmonicDay(dayNameFull, dmy.day),
-    [dayNameFull, dmy.day],
-  );
-
-  const monthChakra = React.useMemo<ChakraName>(() => chakraFromMonth(dmy.month), [dmy.month]);
-  const monthName = React.useMemo<string>(() => monthNameFromIndex(dmy.month), [dmy.month]);
-
-  const dmyText = `D${dmy.day}/M${dmy.month}/Y${dmy.year}`;
-  const dayChakraLabel = chakraToLabel(dayChakra);
-  const monthChakraLabel = chakraToLabel(monthChakra);
-
-  const styleVars: KaiStatusVars = React.useMemo(() => {
-    return {
-      "--kai-progress": progress,
-      "--kai-ui-scale": uiScaleFor(layout),
-    };
-  }, [progress, layout]);
-
-  // KaiKlock props derived from Beat/Step (stable + deterministic)
-  const stepsPerDay = 36 * 44; // 1584
-  const stepOfDay = Math.max(0, Math.min(stepsPerDay - 1, beatNum * 44 + stepNum));
-  const harmonicDayPercent = (stepOfDay / stepsPerDay) * 100;
-  const microCyclePercent = progress * 100;
-
-  // If your dial expects hue degrees, keep it a string degrees payload.
-  const hue = String(Math.round((beatNum / 36) * 360));
-
   const [dialOpen, setDialOpen] = React.useState<boolean>(false);
   const openDial = React.useCallback(() => setDialOpen(true), []);
   const closeDial = React.useCallback(() => setDialOpen(false), []);
+
+  // Boundary flash (wrap event driven)
+  const [flash, setFlash] = React.useState<boolean>(false);
+  const flashTimerRef = React.useRef<number | null>(null);
+
+  const triggerFlash = React.useCallback(() => {
+    setFlash(true);
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => {
+      setFlash(false);
+      flashTimerRef.current = null;
+    }, 180);
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    };
+  }, []);
+
+  // Smooth countdown animator (always live; no reload; no glitch)
+  const { secsLeft, progress } = useSmoothCountdownAnimator({
+    active: true,
+    rootRef,
+    numRef: countdownNumRef,
+    pulseDurSec: pulseDur,
+    dialOpen,
+    onWrap: triggerFlash,
+  });
 
   const onRootKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -616,26 +682,51 @@ export function KaiStatus(): React.JSX.Element {
     };
   }, [dialOpen, closeDial]);
 
+  const dayChakra = React.useMemo<ChakraName>(
+    () => chakraFromHarmonicDay(dayNameFull, dmy.day),
+    [dayNameFull, dmy.day],
+  );
+
+  const monthChakra = React.useMemo<ChakraName>(() => chakraFromMonth(dmy.month), [dmy.month]);
+  const monthName = React.useMemo<string>(() => monthNameFromIndex(dmy.month), [dmy.month]);
+
+  const dmyText = `D${dmy.day}/M${dmy.month}/Y${dmy.year}`;
+  const dayChakraLabel = chakraToLabel(dayChakra);
+  const monthChakraLabel = chakraToLabel(monthChakra);
+
+  const styleVars: KaiStatusVars = React.useMemo(() => {
+    return {
+      "--kai-ui-scale": uiScaleFor(layout),
+    };
+  }, [layout]);
+
+  // Dial percents
+  const stepsPerDay = 36 * 44; // 1584
+  const stepOfDay = Math.max(0, Math.min(stepsPerDay - 1, beatNum * 44 + stepNum));
+  const harmonicDayPercent = (stepOfDay / stepsPerDay) * 100;
+  const microCyclePercent = progress * 100;
+
+  const hue = String(Math.round((beatNum / 36) * 360));
+  const secsTextFull = secsLeft !== null ? secsLeft.toFixed(6) : "—";
+
   const Countdown = (
     <div className="kai-status__countdown" aria-label="Next pulse">
       <span className="kai-status__nLabel">NEXT</span>
       <span
         className="kai-status__nVal"
         title={secsTextFull}
-        aria-label={`Next pulse in ${secsTextFull} seconds`}
+        aria-label={secsLeft !== null ? `Next pulse in ${secsTextFull} seconds` : "Next pulse in — seconds"}
       >
-        {secsText} <span className="kai-status__nUnit">s</span>
+        <span ref={countdownNumRef} className="kai-status__nNum">
+          {secsLeft !== null ? secsLeft.toFixed(6) : "—"}
+        </span>{" "}
+        <span className="kai-status__nUnit">s</span>
       </span>
     </div>
   );
 
   const PulsePill = (
-    <span
-      className="kai-pill kai-pill--pulse"
-      title={`Pulse ${pulseNum}`}
-      aria-label={`Pulse ${pulseNum}`}
-      data-chakra="Pulse"
-    >
+    <span className="kai-pill kai-pill--pulse" title={`Pulse ${pulseNum}`} aria-label={`Pulse ${pulseNum}`} data-chakra="Pulse">
       ☤KAI: <strong className="kai-pill__num">{pulseNum}</strong>
     </span>
   );
@@ -657,12 +748,7 @@ export function KaiStatus(): React.JSX.Element {
   );
 
   const DayPill = (
-    <span
-      className="kai-pill kai-pill--day"
-      title={dayNameFull}
-      aria-label={`Day ${dayNameFull}`}
-      data-chakra={dayChakra}
-    >
+    <span className="kai-pill kai-pill--day" title={dayNameFull} aria-label={`Day ${dayNameFull}`} data-chakra={dayChakra}>
       {dayNameFull}
     </span>
   );
@@ -679,12 +765,7 @@ export function KaiStatus(): React.JSX.Element {
   );
 
   const MonthNamePill = (
-    <span
-      className="kai-pill kai-pill--monthName"
-      title={monthName}
-      aria-label={`Month ${monthName}`}
-      data-chakra={monthChakra}
-    >
+    <span className="kai-pill kai-pill--monthName" title={monthName} aria-label={`Month ${monthName}`} data-chakra={monthChakra}>
       {monthName}
     </span>
   );
@@ -701,12 +782,7 @@ export function KaiStatus(): React.JSX.Element {
   );
 
   const ArkPill = (
-    <span
-      className="kai-pill kai-pill--ark"
-      title={arkFull}
-      aria-label={`Ark ${arkFull}`}
-      data-chakra={arkChakra}
-    >
+    <span className="kai-pill kai-pill--ark" title={arkFull} aria-label={`Ark ${arkFull}`} data-chakra={arkChakra}>
       {arkFull}
     </span>
   );
@@ -715,12 +791,7 @@ export function KaiStatus(): React.JSX.Element {
     dialOpen && typeof document !== "undefined"
       ? createPortal(
           <div className="kk-pop" role="dialog" aria-modal="true" aria-label="Kai-Klok">
-            <button
-              type="button"
-              className="kk-pop__backdrop"
-              aria-label="Close Kai-Klok"
-              onClick={closeDial}
-            />
+            <button type="button" className="kk-pop__backdrop" aria-label="Close Kai-Klok" onClick={closeDial} />
             <div className="kk-pop__panel" role="document">
               <div className="kk-pop__head">
                 <div className="kk-pop__title">Kai-Klok</div>
@@ -793,7 +864,6 @@ export function KaiStatus(): React.JSX.Element {
         data-year-num={dmy.year}
         style={styleVars}
       >
-        {/* ROW 1: day row (one line; scrollable) */}
         <div className="kai-status__top" aria-label="Kai timeline (day row)">
           <span className="kai-status__bsiWrap" aria-label={`Beat step ${beatStepDisp}`}>
             <span className="kai-status__kLabel" aria-hidden="true">
@@ -811,20 +881,17 @@ export function KaiStatus(): React.JSX.Element {
           {pulseOnTop ? PulsePill : null}
         </div>
 
-        {/* ROW 2: month + ark row (one line; scrollable) */}
         <div className="kai-status__mid" aria-label="Kai timeline (month/ark row)">
           {MonthNamePill}
           {MonthChakraPill}
           {ArkPill}
         </div>
 
-        {/* ROW 3: countdown row (pulse drops here on tiny/nano) */}
         <div className="kai-status__bottom" aria-label="Next pulse row">
           {pulseOnTop ? null : PulsePill}
           {Countdown}
         </div>
 
-        {/* Progress bar (always present) */}
         <div className="kai-feed-status__bar" aria-hidden="true">
           <div className="kai-feed-status__barFill" />
           <div className="kai-feed-status__barSpark" />
