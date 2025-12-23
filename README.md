@@ -1479,4 +1479,41 @@ http://verify.kai
 If the Sovereign Gate loads with the ΦNet interface, IKANN is active and your device is running on the Kai-root internet.
 
 
+⸻
+
+## 9. Project Structure (high-level)
+
+```text
+src/
+  App.tsx               # Route shell + Sovereign Gate layout
+  App.css               # ΦNet console shell styles
+
+  components/
+    VerifierStamper/
+      VerifierStamper.tsx
+      VerifierStamper.css
+      SendPhiAmountField.tsx
+      ...               # Verifier subcomponents
+
+    KaiVoh/
+      KaiVohModal.tsx
+      SigilAuthContext.tsx
+      ...               # KaiVoh emission flow
+
+    SigilExplorer.tsx    # Optional sigil viewer / explorer
+    ...                  # Other supporting components
+
+  pages/
+    SigilFeedPage.tsx    # Feed / stream route(s), if enabled
+
+  utils/
+    kai_pulse.ts         # Kairos pulse engine
+    phi-precision.ts     # μΦ locking & fixed-point helpers
+
+vite.config.ts           # Vite config for build / dev
+index.html               # Vite entry HTML
+
+
+```
+
 Proof of Breath™ is a sovereign, cryptographic time protocol that deterministically seals identity, authorship, and value to the exact breath-indexed lattice of reality — not clock time.
