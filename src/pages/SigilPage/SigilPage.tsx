@@ -58,7 +58,7 @@ import { validateSvgForVerifier, putMetadata } from "../../utils/svgMeta";
 import { decodeSigilHistory } from "../../utils/sigilUrl";
 
 /* ——— Theme ——— */
-import { CHAKRA_THEME, isIOS } from "../../components/sigil/theme";
+import { CHAKRA_THEME} from "../../components/sigil/theme";
 
 /* ——— Hooks ——— */
 import { useKaiTicker } from "../../hooks/useKaiTicker";
