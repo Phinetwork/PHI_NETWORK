@@ -1289,7 +1289,7 @@ export function AppChrome(): React.JSX.Element {
   const pageTitle = useMemo<string>(() => {
     const p = location.pathname;
     if (p === "/") return "Verifier";
-    if (p.startsWith("/mint")) return "Mint Sigil";
+    if (p.startsWith("/mint")) return "Mint ΦKEY";
     if (p.startsWith("/voh")) return "KaiVoh";
     if (p.startsWith("/keystream")) return "PhiStream";
     if (p.startsWith("/klock")) return "KaiKlok";
