@@ -1870,6 +1870,54 @@ function buildForest(reg: Registry): SigilNode[] {
 /* ─────────────────────────────────────────────────────────────────────
  *  Memory Stream detail extraction (per content node)
  *  ───────────────────────────────────────────────────────────────────── */
+function resolveCanonicalHashFromNode(node: SigilNode): string | undefined {
+  const payloadHash =
+    typeof (node.payload as unknown as { canonicalHash?: string }).canonicalHash === "string"
+      ? (node.payload as unknown as { canonicalHash?: string }).canonicalHash
+      : undefined;
+
+  if (payloadHash) return payloadHash;
+
+  const primaryHash = parseHashFromUrl(node.url);
+  if (primaryHash) return primaryHash;
+
+  for (const url of node.urls) {
+    const hash = parseHashFromUrl(url);
+    if (hash) return hash;
+
+    const payload = extractPayloadFromUrl(url);
+    if (!payload) continue;
+    const embedded =
+      typeof (payload as { canonicalHash?: unknown }).canonicalHash === "string"
+        ? (payload as { canonicalHash?: string }).canonicalHash
+        : undefined;
+    if (embedded) return embedded;
+  }
+
+  return undefined;
+}
+
+function resolveTransferMoveForNode(
+  node: SigilNode,
+  transferRegistry: ReadonlyMap<string, SigilTransferRecord>,
+): TransferMove | undefined {
+  const canonicalHash = resolveCanonicalHashFromNode(node);
+  const registryMove = getTransferMoveFromRegistry(canonicalHash, transferRegistry);
+  if (registryMove) return registryMove;
+
+  const payloadMove = getTransferMoveFromPayload(node.payload);
+  if (payloadMove) return payloadMove;
+
+  for (const url of node.urls) {
+    const payload = extractPayloadFromUrl(url);
+    if (!payload) continue;
+    const derived = getTransferMoveFromPayload(payload);
+    if (derived) return derived;
+  }
+
+  return undefined;
+}
+
 function buildDetailEntries(
   node: SigilNode,
   usernameClaims: UsernameClaimRegistry,
@@ -1882,10 +1930,7 @@ function buildDetailEntries(
   const phiSelf = getPhiFromPayload(node.payload);
   if (phiSelf !== undefined) entries.push({ label: "This glyph Φ", value: `${formatPhi(phiSelf)} Φ` });
 
-  const canonicalHash =
-    parseHashFromUrl(node.url) ?? (typeof record.canonicalHash === "string" ? record.canonicalHash : undefined);
-  const transferMove =
-    getTransferMoveFromRegistry(canonicalHash, transferRegistry) ?? getTransferMoveFromPayload(node.payload);
+  const transferMove = resolveTransferMoveForNode(node, transferRegistry);
 
   if (transferMove) {
     entries.push({
@@ -2108,11 +2153,7 @@ function SigilTreeNode({
 }: SigilTreeNodeProps) {
   const open = expanded.has(node.id);
 
-  const hash =
-    parseHashFromUrl(node.url) ??
-    (typeof (node.payload as unknown as { canonicalHash?: string }).canonicalHash === "string"
-      ? (node.payload as unknown as { canonicalHash?: string }).canonicalHash
-      : undefined);
+  const hash = resolveCanonicalHashFromNode(node);
   const sig = node.payload.kaiSignature;
   const chakraDay = node.payload.chakraDay;
 
@@ -2121,8 +2162,7 @@ function SigilTreeNode({
 
   const openHref = explorerOpenUrl(node.url);
   const detailEntries = open ? buildDetailEntries(node, usernameClaims, transferRegistry) : [];
-  const transferMove =
-    getTransferMoveFromRegistry(hash, transferRegistry) ?? getTransferMoveFromPayload(node.payload);
+  const transferMove = resolveTransferMoveForNode(node, transferRegistry);
 
   return (
     <div
