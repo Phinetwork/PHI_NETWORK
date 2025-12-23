@@ -1314,6 +1314,12 @@ useEffect(() => {
   const [stargateOpen, setStargateOpen] = useState(false);
   const [stargateSrc, setStargateSrc] = useState<string>("");
 
+  useEffect(() => {
+    if (stargateOpen) return;
+    document.documentElement.classList.remove("stargate-open");
+    document.body.classList.remove("stargate-open");
+  }, [stargateOpen]);
+
   const openStargate = useCallback(async () => {
     const el = frameRef.current;
     if (!el) return;
