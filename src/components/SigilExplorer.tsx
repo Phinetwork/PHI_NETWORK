@@ -67,10 +67,10 @@ import "./SigilExplorer.css";
 const LIVE_BASE_URL = "https://align.kaiklok.com";
 
 /* ─────────────────────────────────────────────────────────────────────
-   IKANN backup base (same LAH-MAH-TOR API surface)
+   PHI.Network backup base (same LAH-MAH-TOR API surface)
 ────────────────────────────────────────────────────────────────────── */
-// Use http so the backup host still works on http pages (avoids mixed-content blocks).
-const LIVE_BACKUP_URL = "http://m.kai";
+
+const LIVE_BACKUP_URL = "https://m.phi.network";
 
 /* ─────────────────────────────────────────────────────────────────────
  *  Types
