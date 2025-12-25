@@ -643,7 +643,7 @@ useMemo(() => {
           </div>
 
           <div className="sp-field">
-            <label className="lbl">Kai Signature</label>
+            <label className="lbl">☤Kai Signature</label>
             <output
               className="mono mono-wrap"
               aria-live="polite"

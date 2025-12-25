@@ -326,7 +326,7 @@ function KaiStamp({ p }: { p: { pulse?: number; beat?: number; stepIndex?: numbe
 
   return (
     <span className="k-stamp" title={`pulse ${pulse} • beat ${beat} • step ${step}`}>
-      <span className="k-pill">pulse {pulse}</span>
+      <span className="k-pill">☤KAI {pulse}</span>
       <span className="k-dot">•</span>
       <span className="k-pill">beat {beat}</span>
       <span className="k-dot">•</span>
@@ -1533,11 +1533,11 @@ const SigilExplorer: React.FC = () => {
         <div className="explorer-inner">
           {forest.length === 0 ? (
             <div className="kx-empty">
-              <p><strong>No origins inhaled yet.</strong></p>
+              <p>No sigil-glyphs in your keystream yet.</p>
               <ol>
-                <li>Paste a stream/sigil URL into the input.</li>
-                <li>Press <strong>Inhale</strong>.</li>
-                <li>Open nodes to see lineage + Φ evidence.</li>
+                <li>Import your keystream memories.</li>
+                <li>Seal a moment — auto-registered here.</li>
+                <li>Inhale any sigil-glyph or memory key above — lineage aligns instantly.</li>
               </ol>
             </div>
           ) : (
@@ -1558,7 +1558,7 @@ const SigilExplorer: React.FC = () => {
 
           <footer className="kx-footer" aria-label="Explorer footer">
             <span className="row">
-              <span>φ-breath sync</span>
+               <span>Determinate • Stateless • Kairos-Memory</span>
               <span className="dot">•</span>
               <span>{isOnline() ? "online" : "offline"}</span>
               <span className="dot">•</span>
