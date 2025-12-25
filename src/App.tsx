@@ -1051,7 +1051,7 @@ export function AppChrome(): React.JSX.Element {
     () => [
       { to: "/", label: "Verifier", desc: "Inhale + Exhale", end: true },
       { to: "/mint", label: "Mint ΦKey", desc: "Breath-minted seal" },
-      { to: "/voh", label: "KaiVoh", desc: "Memory OS" },
+      { to: "/voh", label: "KaiVoh™", desc: "Memory OS" },
       { to: "/keystream", label: "ΦStream", desc: "Live keystream" },
     ],
     [],
@@ -1061,7 +1061,7 @@ export function AppChrome(): React.JSX.Element {
     const p = location.pathname;
     if (p === "/") return "Verifier";
     if (p.startsWith("/mint")) return "Mint ΦKEY";
-    if (p.startsWith("/voh")) return "KaiVoh";
+    if (p.startsWith("/voh")) return "KaiVoh™";
     if (p.startsWith("/keystream")) return "PhiStream";
     if (p.startsWith("/klock")) return "KaiKlok";
     return "Sovereign Gate";
@@ -1351,7 +1351,7 @@ export function AppChrome(): React.JSX.Element {
                   <div className="panel-head__title">{pageTitle}</div>
                   <div className="panel-head__meta">
                     <span className="meta-chip">Proof of Breath™</span>
-                    <span className="meta-chip">Kai-Signature™</span>
+                    <span className="meta-chip">☤Kai-Signature™</span>
                   </div>
                 </div>
 
