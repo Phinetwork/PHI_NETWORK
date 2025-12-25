@@ -737,6 +737,34 @@
   opacity: 0.95;
   user-select: none;
 }
+/* Arc pill (Ignite / Dream / etc) uses the exact chakra RGB for this card */
+.fc-arc {
+  color: rgb(var(--fc-accent-r), var(--fc-accent-g), var(--fc-accent-b));
+
+  /* optional, but matches your pill look while staying chakra-true */
+  border-color: rgba(var(--fc-accent-r), var(--fc-accent-g), var(--fc-accent-b), 0.55);
+  background-color: rgba(var(--fc-accent-r), var(--fc-accent-g), var(--fc-accent-b), 0.10);
+}
+/* ARC badge ONLY — force it to use arc vars, not the card/day accent */
+.arcPill,
+.kaiArcPill,
+.feedArcPill,
+[data-role="kai-arc"] {
+  color: rgb(var(--fc-arc-r), var(--fc-arc-g), var(--fc-arc-b)) !important;
+  border-color: rgba(var(--fc-arc-r), var(--fc-arc-g), var(--fc-arc-b), 0.55) !important;
+
+  /* optional: keep your glass look but tinted by arc */
+  box-shadow:
+    0 0 0 1px rgba(var(--fc-arc-r), var(--fc-arc-g), var(--fc-arc-b), 0.18),
+    0 10px 26px rgba(var(--fc-arc-r), var(--fc-arc-g), var(--fc-arc-b), 0.10) !important;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(var(--fc-arc-r), var(--fc-arc-g), var(--fc-arc-b), 0.10),
+      rgba(0, 0, 0, 0.10)
+    ) !important;
+}
 
 /* ========== 14) ERROR STATE (new + legacy) ===================== */
 .fc--error,
