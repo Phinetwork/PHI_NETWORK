@@ -255,7 +255,7 @@ export default function VerifierFrame({
 
       <div className="kv-verifier__content">
         <header className="kv-verifier__header">
-          <h3 className="kv-verifier__title">Kai-Sigil Verifier</h3>
+          <h3 className="kv-verifier__title">☤Kai-Sigil Verifier</h3>
           <p className="kv-verifier__subtitle">
             Scan or open the verifier link to confirm this post was sealed by this Φ-Key (KPV-1 payload-bound proof).
           </p>
@@ -268,7 +268,7 @@ export default function VerifierFrame({
           </div>
 
           <div className="kv-verifier__meta-row">
-            <dt className="kv-verifier__meta-label">Kai Signature</dt>
+            <dt className="kv-verifier__meta-label">☤Kai Signature</dt>
             <dd className="kv-verifier__meta-value kv-verifier__mono">{proof.kaiSignatureShort}</dd>
           </div>
 

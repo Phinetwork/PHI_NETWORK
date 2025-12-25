@@ -2129,7 +2129,7 @@ function buildDetailEntries(
   addFromKey("userPhiKey", "PhiKey");
   addFromKey("phiKey", "PhiKey");
   addFromKey("phikey", "PhiKey");
-  addFromKey("kaiSignature", "Kai Signature");
+  addFromKey("kaiSignature", "☤Kai Signature");
 
   const parentRaw = record.parentUrl;
   if (typeof parentRaw === "string" && parentRaw.length > 0) {
