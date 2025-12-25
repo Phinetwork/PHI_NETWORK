@@ -113,7 +113,7 @@ export type SyncReason = "open" | "pulse" | "visible" | "focus" | "online" | "im
 /** Small shared helpers (types only). */
 export type UrlHealthScore = 1 | -1;
 
-export type InhaleSource = "local" | "remote" | "hydrate";
+export type InhaleSource = "local" | "remote" | "hydrate" | "import";
 
 export type AddUrlOptions = {
   includeAncestry?: boolean;

@@ -30,7 +30,7 @@ const canStorage = hasWindow && typeof window.localStorage !== "undefined";
 export const memoryRegistry: Registry = new Map();
 const channel = hasWindow && "BroadcastChannel" in window ? new BroadcastChannel(BC_NAME) : null;
 
-export type AddSource = "local" | "remote" | "hydrate";
+export type AddSource = "local" | "remote" | "hydrate" | "import";
 
 export type AddUrlOptions = {
   includeAncestry?: boolean;

@@ -709,7 +709,7 @@ const SigilExplorer: React.FC = () => {
                 claimUrl: entry.claimUrl,
                 originHash: entry.originHash ?? current?.originHash,
                 ownerHint: entry.ownerHint ?? current?.ownerHint ?? null,
-                updatedAtMs: current?.updatedAtMs ?? 0,
+                updatedAt: current?.updatedAt ?? 0,
               },
             };
           }
