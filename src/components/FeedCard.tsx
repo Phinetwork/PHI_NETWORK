@@ -2687,18 +2687,89 @@ function beatStepFromPulseKKS(pulse: number): { beatZ: number; stepZ: number } {
 
   const kai = buildKaiMetaLineZero(pulse, beatZ, stepZ, day, month, year);
   const stepPct = stepPctFromIndex(stepZ);
+const ARC_RGB = {
+  Ignite: [255, 92, 72],
+  Integrate: [72, 200, 255],
+  Harmonize: [72, 255, 170],
+  Reflekt: [180, 120, 255],
+  Purify: [230, 240, 255],
+  Dream: [90, 110, 255],
+} as const;
 
-  const [ar, ag, ab] = CHAKRA_RGB[chakraDayDisplay] ?? CHAKRA_RGB.Crown ?? ([238, 241, 251] as const);
+type KaiArc = keyof typeof ARC_RGB;
+
+const ARC_ALIASES: Record<string, KaiArc> = {
+  ignite: "Ignite",
+  ignition: "Ignite",
+  "ignition ark": "Ignite",
+
+  integrate: "Integrate",
+  integration: "Integrate",
+  "integration ark": "Integrate",
+
+  harmonize: "Harmonize",
+  harmonization: "Harmonize",
+  "harmonization ark": "Harmonize",
+
+  reflekt: "Reflekt",
+  reflection: "Reflekt",
+  "reflection ark": "Reflekt",
+
+  purify: "Purify",
+  purification: "Purify",
+  "purification ark": "Purify",
+
+  dream: "Dream",
+  "dream ark": "Dream",
+};
+
+function toKaiArc(raw: string): KaiArc | null {
+  const k = raw.trim().toLowerCase();
+  return ARC_ALIASES[k] ?? null;
+}
+
+// ✅ DAY color (card + chakraDay title)
+const [dr, dg, db] = CHAKRA_RGB[chakraDay];
+
+// ✅ ARC color (ONLY arc name)
+const arcKey = toKaiArc(kai.arc);
+const [ar, ag, ab] = arcKey ? ARC_RGB[arcKey] : [dr, dg, db];
+// ✅ Scope ARC color to the arc pill itself (so Ignite is red even on Heart day)
+const arcPillStyle: React.CSSProperties = {
+  // preferred (if your CSS uses these)
+  ["--fc-arc-r" as never]: String(ar),
+  ["--fc-arc-g" as never]: String(ag),
+  ["--fc-arc-b" as never]: String(ab),
+
+  // fallback (if your CSS still keys off accent vars for pills)
+  ["--fc-accent-r" as never]: String(ar),
+  ["--fc-accent-g" as never]: String(ag),
+  ["--fc-accent-b" as never]: String(ab),
+};
+
 
   const phase = ((pulse % 13) + 13) % 13;
-  const styleVars: React.CSSProperties = {
-    ["--fc-accent-r" as never]: String(ar),
-    ["--fc-accent-g" as never]: String(ag),
-    ["--fc-accent-b" as never]: String(ab),
-    ["--fc-pulse-dur" as never]: "5236ms",
-    ["--fc-pulse-offset" as never]: `${-(phase * 120)}ms`,
-    ["--fc-thread-depth" as never]: String(depth),
-  };
+
+const styleVars: React.CSSProperties = {
+  // --- day drives the card ---
+  ["--fc-day-r" as never]: String(dr),
+  ["--fc-day-g" as never]: String(dg),
+  ["--fc-day-b" as never]: String(db),
+
+  // keep existing accent vars bound to DAY so the card stays chakraDay-colored
+  ["--fc-accent-r" as never]: String(dr),
+  ["--fc-accent-g" as never]: String(dg),
+  ["--fc-accent-b" as never]: String(db),
+
+  // --- arc drives ONLY the arc pill ---
+  ["--fc-arc-r" as never]: String(ar),
+  ["--fc-arc-g" as never]: String(ag),
+  ["--fc-arc-b" as never]: String(ab),
+
+  ["--fc-pulse-dur" as never]: "5236ms",
+  ["--fc-pulse-offset" as never]: `${-(phase * 120)}ms`,
+  ["--fc-thread-depth" as never]: String(depth),
+};
 
   const dataKindAttr = memoryMode ? "memory" : kindText;
 
@@ -2865,7 +2936,7 @@ function beatStepFromPulseKKS(pulse: number): { beatZ: number; stepZ: number } {
                 <span className="fc-kai mono" title="Kai meta line">
                   {kai.line}
                 </span>
-                <span className="fc-arc" title="Arc">
+                <span className="fc-arc" title="Arc" style={arcPillStyle}>
                   {kai.arc}
                 </span>
               </div>
