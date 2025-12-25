@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type React from "react";
 import type { FC } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import "./NoteModal.css";
 
 /* ══════════════ Public types ══════════════ */
 export interface Note {
