@@ -8,6 +8,8 @@ import "./App.css";
 import AppRouter from "./router/AppRouter";
 import { APP_VERSION, SW_VERSION_EVENT } from "./version";
 import ErrorBoundary from "./components/ErrorBoundary";
+import type { Groth16 } from "./components/VerifierStamper/zk";
+import * as snarkjs from "snarkjs";
 
 // ✅ REPLACE scheduler impl with your utils cadence file
 import { startKaiCadence, startKaiFibBackoff } from "./utils/kai_cadence";
@@ -47,6 +49,21 @@ if (isProduction) {
   window.addEventListener("DOMContentLoaded", rewriteLegacyHash, { once: true });
 }
 
+async function loadSnarkjsGlobal(): Promise<void> {
+  if (typeof window === "undefined") return;
+  if (window.snarkjs) return;
+
+  try {
+    const mod = snarkjs as unknown as { groth16?: Groth16; default?: { groth16?: Groth16 } };
+    const groth16 = mod.groth16 ?? mod.default?.groth16;
+    if (groth16) {
+      window.snarkjs = { groth16 };
+    }
+  } catch (err) {
+    console.error("Failed to load snarkjs", err);
+  }
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
@@ -54,6 +71,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+
+void loadSnarkjsGlobal();
 
 // ✅ Register Kairos Service Worker with instant-upgrade behavior
 if ("serviceWorker" in navigator && isProduction) {
