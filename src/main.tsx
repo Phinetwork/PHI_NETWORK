@@ -17,6 +17,7 @@ const isProduction = import.meta.env.MODE === "production";
 declare global {
   interface Window {
     kairosSwVersion?: string;
+    snarkjs?: unknown;
   }
 }
 
@@ -47,6 +48,24 @@ if (isProduction) {
   window.addEventListener("DOMContentLoaded", rewriteLegacyHash, { once: true });
 }
 
+async function loadSnarkjsGlobal(): Promise<void> {
+  if (typeof window === "undefined") return;
+  if (window.snarkjs) return;
+
+  try {
+    const mod = await import("snarkjs");
+    if (mod?.groth16) {
+      window.snarkjs = mod;
+      return;
+    }
+    if (mod?.default?.groth16) {
+      window.snarkjs = mod.default;
+    }
+  } catch (err) {
+    console.error("Failed to load snarkjs", err);
+  }
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
@@ -54,6 +73,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+
+void loadSnarkjsGlobal();
 
 // ✅ Register Kairos Service Worker with instant-upgrade behavior
 if ("serviceWorker" in navigator && isProduction) {
