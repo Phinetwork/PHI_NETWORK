@@ -82,12 +82,37 @@
      (Used by the “Verify Ownership” button)
   ──────────────────────────────────────────────────────────── */
   .sp-btn-full { width: 100%; }
+
+  .btn-primary--xl {
+    color: #f6fffe;
+    background:
+      linear-gradient(160deg, rgba(255,255,255,.32), rgba(255,255,255,.08) 55%, rgba(0,0,0,.06) 100%),
+      radial-gradient(120% 120% at 12% -10%, rgba(120,255,240,.35), transparent 60%),
+      linear-gradient(180deg, rgba(20,120,110,.32), rgba(20,60,58,.24));
+    border: 1px solid rgba(140,255,240,.45);
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,.12) inset,
+      0 18px 44px rgba(10, 255, 222, .18),
+      0 0 36px rgba(92,225,255,.28);
+    text-shadow: 0 0 16px rgba(140,255,240,.55), 0 0 6px rgba(0,0,0,.45);
+  }
+
+  .btn-primary--xl:hover {
+    border-color: rgba(180,255,250,.7);
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,.16) inset,
+      0 22px 58px rgba(92,225,255,.3),
+      0 0 40px rgba(92,225,255,.32);
+  }
   
   @media (max-width: 480px) {
     .btn-primary--xl {
       min-height: 56px;
       border-radius: 14px;
       font-size: 16px; /* Avoid iOS zoom-on-tap */
+      background:
+        linear-gradient(160deg, rgba(255,255,255,.28), rgba(255,255,255,.08) 55%, rgba(0,0,0,.08) 100%),
+        linear-gradient(180deg, rgba(18,86,80,.3), rgba(10,32,30,.22));
     }
   }
   
