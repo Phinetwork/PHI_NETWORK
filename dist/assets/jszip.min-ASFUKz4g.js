@@ -1,0 +1,1 @@
+import{B as e}from"./index-CpJjGwc8.js";export default e();
