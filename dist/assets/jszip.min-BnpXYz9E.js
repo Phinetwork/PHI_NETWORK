@@ -1,0 +1,1 @@
+import{B as e}from"./index-D65_vFc9.js";export default e();
