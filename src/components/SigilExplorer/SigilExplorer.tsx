@@ -186,14 +186,21 @@ function parseJsonAsync(text: string): Promise<unknown> {
     };
   `;
 
-  const blob = new Blob([workerSrc], { type: "text/javascript" });
-  const workerUrl = URL.createObjectURL(blob);
-  const worker = new Worker(workerUrl);
+  let worker: Worker | null = null;
+  let workerUrl = "";
+  try {
+    const blob = new Blob([workerSrc], { type: "text/javascript" });
+    workerUrl = URL.createObjectURL(blob);
+    worker = new Worker(workerUrl);
+  } catch {
+    if (workerUrl) URL.revokeObjectURL(workerUrl);
+    return Promise.resolve(JSON.parse(text) as unknown);
+  }
 
   return new Promise((resolve, reject) => {
     const cleanup = () => {
-      worker.terminate();
-      URL.revokeObjectURL(workerUrl);
+      worker?.terminate();
+      if (workerUrl) URL.revokeObjectURL(workerUrl);
     };
 
     worker.onmessage = (event) => {
