@@ -44,6 +44,7 @@ import {
   epochMsFromPulse,
   microPulsesSinceGenesis,
   utcFromBreathSlot,
+  latticeFromMicroPulses,
   normalizePercentIntoStep,
   buildKaiKlockResponse,
   type Weekday,
@@ -1013,8 +1014,12 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
   };
 
   /* KKS v1.0 derived ONLY from pulse (BIGINT) */
-  const kks = useMemo(() => {
-    return exactBeatStepFromPulse(pulse);
+  const kksDisplay = useMemo(() => exactBeatStepFromPulse(pulse), [pulse]);
+  const kksSigil = useMemo(() => {
+    const pμ = pulse * ONE_PULSE_MICRO;
+    const { beat, stepIndex, percentIntoStep } = latticeFromMicroPulses(pμ);
+    const stepPct = normalizePercentIntoStep(percentIntoStep);
+    return { beat, stepIndex, stepPct };
   }, [pulse]);
 
   /* ChakraDay for visuals */
@@ -1058,9 +1063,9 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       const { beatIndex, stepIndex } = getKaiPulseToday(when);
       return { beat: beatIndex, stepIndex };
     } catch {
-      return { beat: kks.beat, stepIndex: kks.stepIndex };
+      return { beat: kksDisplay.beat, stepIndex: kksDisplay.stepIndex };
     }
-  }, [pulse, kks.beat, kks.stepIndex]);
+  }, [pulse, kksDisplay.beat, kksDisplay.stepIndex]);
 
   /* Derive KaiKlock “response” for current pulse */
   useEffect(() => {
@@ -1083,7 +1088,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
   }, [pulse]);
 
   /* UI strings */
-  const localBeatStep = `${kks.beat}:${pad2(kks.stepIndex)}`;
+  const localBeatStep = `${kksDisplay.beat}:${pad2(kksDisplay.stepIndex)}`;
 
   const chakraStepString = kairos ? readString(kairos, "chakraStepString") : undefined;
   const beatStepDisp = localBeatStep;
@@ -1171,12 +1176,12 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
   const makeSharePayload = (canonicalHash: string): SigilSharePayloadExtended => {
     const stepsPerBeat = STEPS_BEAT;
 
-    const s = Number.isFinite(kks.stepIndex)
-      ? Math.max(0, Math.min(Math.trunc(kks.stepIndex), stepsPerBeat - 1))
+    const s = Number.isFinite(kksDisplay.stepIndex)
+      ? Math.max(0, Math.min(Math.trunc(kksDisplay.stepIndex), stepsPerBeat - 1))
       : 0;
 
-    const b = Number.isFinite(kks.beat)
-      ? Math.max(0, Math.min(Math.trunc(kks.beat), BEATS_DAY - 1))
+    const b = Number.isFinite(kksDisplay.beat)
+      ? Math.max(0, Math.min(Math.trunc(kksDisplay.beat), BEATS_DAY - 1))
       : 0;
 
     const pulsePixel = biToSafeNumber(pulse);
@@ -1205,7 +1210,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       const basis =
         (svgStr || "no-svg") +
         `|pulseExact=${pulse.toString()}` +
-        `|beat=${kks.beat}|step=${kks.stepIndex}|chakra=${chakraDay}`;
+        `|beat=${kksDisplay.beat}|step=${kksDisplay.stepIndex}|chakra=${chakraDay}`;
       hash = (await sha256Hex(basis)).toLowerCase();
     }
 
@@ -1225,7 +1230,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
     const canonicalHash = canonical
       ? canonical
       : (await sha256Hex(
-          `pulseExact=${pulse.toString()}|beat=${kks.beat}|step=${kks.stepIndex}|chakra=${chakraDay}`
+          `pulseExact=${pulse.toString()}|beat=${kksDisplay.beat}|step=${kksDisplay.stepIndex}|chakra=${chakraDay}`
         )).toLowerCase();
 
     const meta = makeSharePayload(canonicalHash);
@@ -1297,13 +1302,13 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
     return canonicalizeSealText(
       raw,
       pulse,
-      kks.beat,
-      kks.stepIndex,
+      kksDisplay.beat,
+      kksDisplay.stepIndex,
       solarBeatStep.beat,
       solarBeatStep.stepIndex,
       eternalYearText || undefined
     );
-  }, [kairos, kks.beat, kks.stepIndex, pulse, solarBeatStep, eternalYearText]);
+  }, [kairos, kksDisplay.beat, kksDisplay.stepIndex, pulse, solarBeatStep, eternalYearText]);
 
   // Memory display helpers
   const kaiPulseEternalNum = kairos ? readNumber(kairos, "kaiPulseEternal") : undefined;
@@ -1451,9 +1456,9 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
             <KaiSigil
               ref={sigilRef}
               pulse={pulseForSigil}
-              beat={kks.beat}
-              stepIndex={kks.stepIndex}
-              stepPct={kks.stepPct}
+              beat={kksSigil.beat}
+              stepIndex={kksSigil.stepIndex}
+              stepPct={kksSigil.stepPct}
               chakraDay={chakraDay as KaiSigilProps["chakraDay"]}
               size={240}
               hashMode="deterministic"
