@@ -48,6 +48,7 @@ import {
 /* 🧱 Typed SSOT + adapter */
 import type { KlockData } from "../types/klockTypes";
 import { toKlockData } from "../utils/klock_adapters";
+import { getSolarAlignedCounters, SOLAR_DAY_NAMES } from "../SovereignSolar";
 
 /* ═════════════ external props ═════════════ */
 interface Props {
@@ -97,6 +98,29 @@ const fmt = (n: number) => (Number.isFinite(n) ? n.toLocaleString() : String(n))
 
 const fmtSealKairos = (beat: number, stepIdx: number) => `${beat}:${pad2(stepIdx)}`;
 
+type SolarSealContext = {
+  weekday: string;
+  dayOfMonth: number;
+  monthIndex: number;
+};
+
+const getSolarSealContext = (pulse: number): SolarSealContext | null => {
+  try {
+    const msAtPulse = epochMsFromPulse(pulse);
+    const when = new Date(Number(msAtPulse));
+    const counters = getSolarAlignedCounters(when);
+    const fallbackWeekday =
+      SOLAR_DAY_NAMES[((counters.solarAlignedWeekDayIndex ?? 0) + 6) % 6];
+    const weekday = counters.dayName ?? fallbackWeekday;
+    const dayOfMonth =
+      counters.solarAlignedDayInMonth1 ?? (counters.solarAlignedDayInMonth + 1);
+    const monthIndex = counters.solarAlignedMonth;
+    return { weekday, dayOfMonth, monthIndex };
+  } catch {
+    return null;
+  }
+};
+
 /** Rewrites any numeric fields inside a server seal string so they match glyph */
 function canonicalizeSealText(
   seal: string | undefined | null,
@@ -106,6 +130,7 @@ function canonicalizeSealText(
 ): string {
   if (!seal) return "";
   let s = seal;
+  const solarCtx = getSolarSealContext(canonicalPulse);
 
   s = s.replace(
     /Kairos:\s*\d{1,2}:\d{1,2}/i,
@@ -119,6 +144,15 @@ function canonicalizeSealText(
 
   s = s.replace(/Step:\s*\d{1,2}\s*\/\s*44/i, `Step:${stepIdx}/44`);
   s = s.replace(/Beat:\s*\d{1,2}\s*\/\s*36(?:\([^)]+\))?/i, `Beat:${beat}/36`);
+
+  if (solarCtx) {
+    s = s.replace(
+      /Solar Kairos \(UTC-aligned\):\s*\d{1,2}:\d{1,2}\s+\w+\s+D\d+\/M\d+/i,
+      `Solar Kairos (UTC-aligned): ${fmtSealKairos(beat, stepIdx)} ${
+        solarCtx.weekday
+      } D${solarCtx.dayOfMonth}/M${solarCtx.monthIndex}`
+    );
+  }
 
   return s;
 }

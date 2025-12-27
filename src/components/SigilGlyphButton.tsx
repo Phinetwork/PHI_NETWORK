@@ -16,22 +16,19 @@ import {
   latticeFromMicroPulses,
   microPulsesSinceGenesis,
   momentFromUTC,
-  normalizePercentIntoStep,
 } from "../utils/kai_pulse";
 
 /* compute the exact render state the modal uses */
 function computeLocalKai(now: Date): {
   pulse: number;
   beat: number;
-  stepPct: number;                 // 0..1
   chakraDay: KaiSigilProps["chakraDay"];
 } {
   const pμ = microPulsesSinceGenesis(now);
-  const { beat, percentIntoStep } = latticeFromMicroPulses(pμ);
+  const { beat } = latticeFromMicroPulses(pμ);
   const { pulse, chakraDay } = momentFromUTC(now);
-  const stepPct = normalizePercentIntoStep(percentIntoStep);
 
-  return { pulse, beat, stepPct, chakraDay };
+  return { pulse, beat, chakraDay };
 }
 
 /* aligned φ-boundary scheduler (same idea as the modal) */
@@ -48,7 +45,6 @@ interface Props { kaiPulse?: number } // optional seed; ignored once live
 const SigilGlyphButton: React.FC<Props> = () => {
   const [pulse, setPulse] = useState<number>(0);
   const [beat, setBeat] = useState<number>(0);
-  const [stepPct, setStepPct] = useState<number>(0);
   const [chakraDay, setChakraDay] = useState<KaiSigilProps["chakraDay"]>("Root");
   const [open, setOpen] = useState(false);
 
@@ -63,10 +59,9 @@ const SigilGlyphButton: React.FC<Props> = () => {
   const targetRef = useRef<number>(0);
 
   const applyNow = useCallback(() => {
-    const { pulse: p, beat: b, stepPct: s, chakraDay: cd } = computeLocalKai(new Date());
+    const { pulse: p, beat: b, chakraDay: cd } = computeLocalKai(new Date());
     setPulse(p);
     setBeat(b);
-    setStepPct(s);
     setChakraDay(cd);
   }, []);
 
@@ -136,7 +131,6 @@ const SigilGlyphButton: React.FC<Props> = () => {
             ref={sigilRef}
             pulse={pulse}
             beat={beat}
-            stepPct={stepPct}
             chakraDay={chakraDay}
             size={40}
             hashMode="deterministic"
