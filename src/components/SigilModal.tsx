@@ -1491,7 +1491,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
 
             <p>
               <strong>Kairos/Date:</strong>&nbsp;
-              {kairosDisp}
+              {kairosDisp} {pulse}
               <button className="copy-btn" onClick={() => copy(kairosDisp)}>
                 💠
               </button>
