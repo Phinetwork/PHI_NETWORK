@@ -1,0 +1,1 @@
+import{B as e}from"./index-Cp_1Iakp.js";export default e();
