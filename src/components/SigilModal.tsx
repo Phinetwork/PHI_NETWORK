@@ -193,7 +193,7 @@ const canonicalizeSealText = (
   if (solarCtx) {
     s = s.replace(
       /Solar Kairos \(UTC-aligned\):\s*\d{1,2}:\d{1,2}\s+\w+\s+D\d+\/M\d+/i,
-      `Solar Kairos (UTC-aligned): ${fmtSealKairos(solarBeat, solarStepIdx)} ${solarCtx.weekday} D${solarCtx.dayOfMonth}/M${solarCtx.monthIndex}`
+      `Solar Kairos: ${fmtSealKairos(solarBeat, solarStepIdx)} ${solarCtx.weekday} D${solarCtx.dayOfMonth}/M${solarCtx.monthIndex}`
     );
   }
 
