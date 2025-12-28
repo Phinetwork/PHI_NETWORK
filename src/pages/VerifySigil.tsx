@@ -44,10 +44,11 @@ import {
   derivePhiKeyFromSigCanon,
   verifierSigmaString,
   readIntentionSigil,
-} from "./SigilPage/verifierCanon";
+} from "../verifier/canonical";
 
 /* Central Kai sigil payload type */
 import type { SigilPayload } from "../types/sigil";
+import { tryVerifyGroth16 } from "../components/VerifierStamper/zk";
 
 /* ──────────────────────────────────────────────────────────────
    Local types
@@ -71,6 +72,13 @@ type BreathProof = {
 };
 
 type SourceKind = "none" | "query" | "upload";
+type ZkStatus = {
+  present: boolean;
+  scheme?: string;
+  poseidonHash?: string;
+  verified?: boolean | null;
+  hint?: string;
+};
 
 /* ──────────────────────────────────────────────────────────────
    Page
@@ -97,6 +105,7 @@ export default function VerifySigil(): React.JSX.Element {
   const [fileName, setFileName] = useState<string | null>(null);
 
   const [breathProof, setBreathProof] = useState<BreathProof | null>(null);
+  const [zkStatus, setZkStatus] = useState<ZkStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [sigilSize, setSigilSize] = useState<number>(320);
@@ -124,6 +133,35 @@ export default function VerifySigil(): React.JSX.Element {
         : percentIntoStepFromPulse(payload?.pulse ?? 0),
     [payload]
   );
+
+  const zkHints = useMemo(() => {
+    const hints = (payload as { proofHints?: unknown })?.proofHints;
+    if (Array.isArray(hints)) {
+      const first = hints.find((item) => typeof item === "object" && item !== null);
+      return (first as Record<string, unknown>) ?? null;
+    }
+    if (typeof hints === "object" && hints !== null) return hints as Record<string, unknown>;
+    return null;
+  }, [payload]);
+
+  const zkScheme = useMemo(() => {
+    const scheme = zkHints?.scheme;
+    return typeof scheme === "string" && scheme.trim().length > 0
+      ? scheme
+      : "groth16-poseidon";
+  }, [zkHints]);
+
+  const zkExplorer = useMemo(() => {
+    const explorer = zkHints?.explorer;
+    return typeof explorer === "string" && explorer.trim().length > 0 ? explorer : null;
+  }, [zkHints]);
+
+  const hasZkProof = useMemo(() => {
+    if (!payload) return false;
+    if (!payload.zkPoseidonHash || payload.zkPoseidonHash === "0x") return false;
+    if (!payload.zkProof || typeof payload.zkProof !== "object") return false;
+    return Object.keys(payload.zkProof as Record<string, unknown>).length > 0;
+  }, [payload]);
 
   // Align dependencies with React Compiler: depend on `payload` not `payload?.canonicalHash`
   const shortHash = useMemo(
@@ -262,6 +300,67 @@ export default function VerifySigil(): React.JSX.Element {
   }, [payload]);
 
   /* ──────────────────────────────────────────────────────────
+     Optional ZK proof verification (best-effort)
+     ────────────────────────────────────────────────────────── */
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (!payload) {
+        if (!cancelled) setZkStatus(null);
+        return;
+      }
+
+      if (!hasZkProof) {
+        if (!cancelled) {
+          setZkStatus({
+            present: false,
+            scheme: zkScheme,
+            poseidonHash: payload.zkPoseidonHash,
+          });
+        }
+        return;
+      }
+
+      try {
+        const fallbackVkey =
+          typeof window !== "undefined" ? window.SIGIL_ZK_VKEY : undefined;
+        const verified = await tryVerifyGroth16({
+          proof: payload.zkProof,
+          publicSignals: [payload.zkPoseidonHash],
+          fallbackVkey,
+        });
+
+        if (!cancelled) {
+          setZkStatus({
+            present: true,
+            scheme: zkScheme,
+            poseidonHash: payload.zkPoseidonHash,
+            verified,
+            hint: verified === null ? "Groth16 verifier not available." : undefined,
+          });
+        }
+      } catch (err) {
+        if (!cancelled) {
+          const message =
+            err instanceof Error ? err.message : "ZK verification failed.";
+          setZkStatus({
+            present: true,
+            scheme: zkScheme,
+            poseidonHash: payload.zkPoseidonHash,
+            verified: false,
+            hint: message,
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [payload, hasZkProof, zkScheme]);
+
+  /* ──────────────────────────────────────────────────────────
      Derived verification status (no setState here)
      ────────────────────────────────────────────────────────── */
   const status: VerifyStatus = useMemo(() => {
@@ -361,6 +460,15 @@ export default function VerifySigil(): React.JSX.Element {
     if (source === "query") return "Source · URL payload (?p=…)";
     return "Source · None";
   }, [source, fileName]);
+
+  const zkVerifyLabel = useMemo(() => {
+    if (!zkStatus) return "—";
+    if (!zkStatus.present) return "missing";
+    if (zkStatus.verified === true) return "✓ verified";
+    if (zkStatus.verified === null) return "verification unavailable";
+    if (zkStatus.verified === false) return "✕ invalid";
+    return "pending";
+  }, [zkStatus]);
 
   /* ──────────────────────────────────────────────────────────
      Render
@@ -590,6 +698,46 @@ export default function VerifySigil(): React.JSX.Element {
                     </li>
                   </ul>
                 </div>
+
+                {zkStatus && (
+                  <div className="verify-proof-block">
+                    <h3>ZK · Proof</h3>
+                    <ul>
+                      <li>
+                        <span className="label">Scheme</span>
+                        <span className="value">{zkStatus.scheme ?? "—"}</span>
+                      </li>
+                      <li>
+                        <span className="label">Poseidon hash</span>
+                        <span className="value mono">
+                          {zkStatus.poseidonHash ?? "missing"}
+                        </span>
+                      </li>
+                      <li>
+                        <span className="label">Proof bundle</span>
+                        <span className="value">
+                          {zkStatus.present ? "present" : "missing"}
+                        </span>
+                      </li>
+                      <li>
+                        <span className="label">Verification</span>
+                        <span className="value">{zkVerifyLabel}</span>
+                      </li>
+                      {zkStatus.hint && (
+                        <li>
+                          <span className="label">Note</span>
+                          <span className="value">{zkStatus.hint}</span>
+                        </li>
+                      )}
+                      {zkExplorer && (
+                        <li>
+                          <span className="label">Explorer</span>
+                          <span className="value mono">{zkExplorer}</span>
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
 
