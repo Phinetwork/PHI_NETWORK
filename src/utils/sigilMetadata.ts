@@ -233,6 +233,58 @@ function findJsonInText(text: string): EmbeddedMeta | null {
   return null;
 }
 
+function isProofBundleMeta(meta: EmbeddedMeta): boolean {
+  return Boolean(meta.bundleHash || (meta.capsuleHash && meta.svgHash));
+}
+
+function findProofBundleInText(text: string): ProofBundleMeta | null {
+  const parsed = safeJsonParse(text);
+  if (parsed) {
+    const meta = toEmbeddedMetaFromUnknown(parsed);
+    if (isProofBundleMeta(meta)) {
+      return {
+        hashAlg: meta.hashAlg,
+        canon: meta.canon,
+        proofCapsule: meta.proofCapsule,
+        capsuleHash: meta.capsuleHash,
+        svgHash: meta.svgHash,
+        bundleHash: meta.bundleHash,
+        verifierUrl: meta.verifierUrl,
+        authorSig: meta.authorSig,
+        raw: parsed,
+      };
+    }
+  }
+
+  const matches = [...text.matchAll(/"(bundleHash|capsuleHash|svgHash)"\s*:/g)];
+  if (!matches.length) return null;
+
+  for (const match of matches) {
+    const idx = match.index ?? 0;
+    const blocks = extractNearbyJsonBlocks(text, idx);
+    for (const block of blocks) {
+      if (!/(bundleHash|capsuleHash|svgHash)/.test(block)) continue;
+      const blobParsed = safeJsonParse(block);
+      if (!blobParsed) continue;
+      const meta = toEmbeddedMetaFromUnknown(blobParsed);
+      if (!isProofBundleMeta(meta)) continue;
+      return {
+        hashAlg: meta.hashAlg,
+        canon: meta.canon,
+        proofCapsule: meta.proofCapsule,
+        capsuleHash: meta.capsuleHash,
+        svgHash: meta.svgHash,
+        bundleHash: meta.bundleHash,
+        verifierUrl: meta.verifierUrl,
+        authorSig: meta.authorSig,
+        raw: blobParsed,
+      };
+    }
+  }
+
+  return null;
+}
+
 function extractFromParsedSvg(parsed: Record<string, unknown>): EmbeddedMeta | null {
   const svg = isRecord(parsed.svg) ? parsed.svg : parsed;
   const candidates: string[] = [];
@@ -336,24 +388,54 @@ export type ProofBundleMeta = {
 
 export function extractProofBundleMetaFromSvg(svgText: string): ProofBundleMeta | null {
   const match = svgText.match(/<metadata[^>]*id=["']kai-proof["'][^>]*>([\s\S]*?)<\/metadata>/i);
-  if (!match) return null;
-  const rawBlock = match[1]?.trim() ?? "";
-  if (!rawBlock) return null;
+  if (match) {
+    const rawBlock = match[1]?.trim() ?? "";
+    if (rawBlock) {
+      const cleaned = rawBlock.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim();
+      const parsed = safeJsonParse(cleaned);
+      if (parsed) {
+        const meta = toEmbeddedMetaFromUnknown(parsed);
+        return {
+          hashAlg: meta.hashAlg,
+          canon: meta.canon,
+          proofCapsule: meta.proofCapsule,
+          capsuleHash: meta.capsuleHash,
+          svgHash: meta.svgHash,
+          bundleHash: meta.bundleHash,
+          verifierUrl: meta.verifierUrl,
+          authorSig: meta.authorSig,
+          raw: parsed,
+        };
+      }
+    }
+  }
 
-  const cleaned = rawBlock.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim();
-  const parsed = safeJsonParse(cleaned);
-  if (!parsed) return null;
+  try {
+    const parsedSvg = XML_PARSER.parse(svgText);
+    if (isRecord(parsedSvg)) {
+      const svg = isRecord(parsedSvg.svg) ? parsedSvg.svg : parsedSvg;
+      const candidates: string[] = [];
 
-  const meta = toEmbeddedMetaFromUnknown(parsed);
-  return {
-    hashAlg: meta.hashAlg,
-    canon: meta.canon,
-    proofCapsule: meta.proofCapsule,
-    capsuleHash: meta.capsuleHash,
-    svgHash: meta.svgHash,
-    bundleHash: meta.bundleHash,
-    verifierUrl: meta.verifierUrl,
-    authorSig: meta.authorSig,
-    raw: parsed,
-  };
+      if (isRecord(svg.metadata)) {
+        collectText(svg.metadata, candidates);
+      } else if (typeof svg.metadata === "string") {
+        candidates.push(svg.metadata);
+      }
+
+      if (isRecord(svg.desc)) {
+        collectText(svg.desc, candidates);
+      } else if (typeof svg.desc === "string") {
+        candidates.push(svg.desc);
+      }
+
+      for (const text of candidates) {
+        const found = findProofBundleInText(text);
+        if (found) return found;
+      }
+    }
+  } catch (err) {
+    console.warn("sigilMetadata: failed to parse SVG proof bundle", err);
+  }
+
+  return findProofBundleInText(svgText);
 }
