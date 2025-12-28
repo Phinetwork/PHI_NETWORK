@@ -41,8 +41,13 @@ import VerifierFrame from "./VerifierFrame";
 import {
   buildVerifierSlug,
   buildVerifierUrl,
+  hashBundle,
   hashProofCapsuleV1,
+  hashSvgText,
   normalizeChakraDay,
+  PROOF_CANON,
+  PROOF_HASH_ALG,
+  PROOF_METADATA_ID,
   type ProofCapsuleV1,
 } from "./verifierProof";
 
@@ -51,6 +56,7 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 
 /* Kai-Klok φ-engine (KKS v1) */
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
+import { signHash } from "../../lib/sigil/signature";
 
 /* Types */
 import type { PostEntry, SessionData } from "../session/sessionTypes";
@@ -92,6 +98,12 @@ type ExtendedKksMetadata = KaiSigKksMetadataShape & {
 
   /** KPV-1: hash that binds the proof capsule */
   proofHash?: string;
+  capsuleHash?: string;
+  svgHash?: string;
+  bundleHash?: string;
+  hashAlg?: string;
+  canon?: string;
+  authorSig?: unknown;
 
   /** KPV-1: canonical capsule used to compute proofHash */
   proofCapsule?: ProofCapsuleV1;
@@ -106,6 +118,12 @@ type VerifierData = Readonly<{
   verifierSlug: string;
   verifierUrl: string;
 
+  hashAlg: string;
+  canon: string;
+  capsuleHash: string;
+  svgHash: string;
+  bundleHash: string;
+  authorSig?: unknown;
   proofHash: string;
 }>;
 
@@ -234,6 +252,35 @@ async function embedMetadataIntoSvgBlob(svgBlob: Blob, metadata: unknown): Promi
     if (metas.length === 0) root.appendChild(metaEl);
 
     metaEl.textContent = JSON.stringify(metadata, null, 2);
+
+    const serializer = new XMLSerializer();
+    const updatedSvg = serializer.serializeToString(doc);
+    return new Blob([updatedSvg], { type: "image/svg+xml" });
+  } catch {
+    return svgBlob;
+  }
+}
+
+async function embedProofMetadataIntoSvgBlob(svgBlob: Blob, metadata: unknown): Promise<Blob> {
+  try {
+    const rawText = await svgBlob.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(rawText, "image/svg+xml");
+
+    if (doc.querySelector("parsererror")) return svgBlob;
+
+    const root = doc.documentElement;
+    if (!root || root.namespaceURI !== SVG_NS || root.tagName.toLowerCase() !== "svg") return svgBlob;
+
+    let proofMeta = doc.querySelector(`metadata#${PROOF_METADATA_ID}`) as SVGMetadataElement | null;
+    if (!proofMeta) {
+      proofMeta = doc.createElementNS(SVG_NS, "metadata") as SVGMetadataElement;
+      proofMeta.setAttribute("id", PROOF_METADATA_ID);
+      proofMeta.setAttribute("data-type", "application/json");
+      root.appendChild(proofMeta);
+    }
+
+    proofMeta.textContent = JSON.stringify(metadata, null, 2);
 
     const serializer = new XMLSerializer();
     const updatedSvg = serializer.serializeToString(doc);
@@ -594,7 +641,7 @@ function KaiVohFlow(): ReactElement {
           verifierSlug,
         };
 
-        const proofHash = await hashProofCapsuleV1(capsule);
+        const capsuleHash = await hashProofCapsuleV1(capsule);
 
         const mergedMetadata: ExtendedKksMetadata = {
           ...baseMeta,
@@ -614,7 +661,10 @@ function KaiVohFlow(): ReactElement {
 
           // ✅ payload-bound integrity proof
           proofCapsule: capsule,
-          proofHash,
+          proofHash: capsuleHash,
+          capsuleHash,
+          hashAlg: PROOF_HASH_ALG,
+          canon: PROOF_CANON,
 
           originPulse,
           sigilPulse: originPulse,
@@ -625,6 +675,36 @@ function KaiVohFlow(): ReactElement {
         let content = mediaRaw.content;
         if (mediaRaw.type === "image" && content.type.includes("svg")) {
           content = await embedMetadataIntoSvgBlob(content, mergedMetadata);
+        }
+
+        let svgHash: string | undefined;
+        let bundleHash: string | undefined;
+        let authorSig: unknown | undefined;
+
+        if (mediaRaw.type === "image" && content.type.includes("svg")) {
+          const svgText = await content.text();
+          svgHash = await hashSvgText(svgText);
+          bundleHash = await hashBundle(capsuleHash, svgHash);
+          try {
+            authorSig = await signHash(bundleHash);
+          } catch (err) {
+            console.warn("Author signature failed; continuing without authorSig.", err);
+            authorSig = undefined;
+          }
+
+          const proofBundle = {
+            v: "KPB-1",
+            hashAlg: PROOF_HASH_ALG,
+            canon: PROOF_CANON,
+            proofCapsule: capsule,
+            capsuleHash,
+            svgHash,
+            bundleHash,
+            verifierUrl,
+            authorSig: authorSig ?? null,
+          };
+
+          content = await embedProofMetadataIntoSvgBlob(content, proofBundle);
         }
 
         const ext =
@@ -638,7 +718,12 @@ function KaiVohFlow(): ReactElement {
           ...mediaRaw,
           content,
           filename,
-          metadata: mergedMetadata,
+          metadata: {
+            ...mergedMetadata,
+            svgHash,
+            bundleHash,
+            authorSig,
+          },
         };
 
         setFinalMedia(media);
@@ -651,7 +736,13 @@ function KaiVohFlow(): ReactElement {
           phiKey: proofPhiKey,
           verifierSlug,
           verifierUrl,
-          proofHash,
+          hashAlg: PROOF_HASH_ALG,
+          canon: PROOF_CANON,
+          capsuleHash,
+          svgHash: svgHash ?? "",
+          bundleHash: bundleHash ?? "",
+          authorSig,
+          proofHash: capsuleHash,
         });
 
         setStep("share");
