@@ -64,7 +64,7 @@ export default function SigilCTA({
           ? "Sealed (Pre-Moment)"
           : exporting
           ? "Sealing…"
-          : "Inhale ΦKey"}
+          : "Inhale ΦKey Seal"}
       </button>
 
       {hasPayload && (

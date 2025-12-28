@@ -383,7 +383,7 @@ const SealMomentModal: FC<Props> = ({
                 disabled={exporting}
               >
                 <SealGlyph />
-                <span>{exporting ? "Sealing..." : "Export Proof Bundle"}</span>
+                <span>{exporting ? "Sealing..." : "Inhale ΦKey Proof"}</span>
               </button>
               <button className="secondary cta" onClick={share} type="button">
                 <ShareGlyph />
