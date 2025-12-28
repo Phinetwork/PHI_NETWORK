@@ -11,8 +11,7 @@
 // ░░  DEPENDENCIES  ░░  (Poseidon is loaded lazily to shrink bundle size)
 ////////////////////////////////////////////////////////////////////////////////
 
-import { blake3 } from "@noble/hashes/blake3";
-import { bytesToHex } from "@noble/hashes/utils";
+import { blake3Hex, hexToBytes } from "../lib/hash";
 
 ////////////////////////////////////////////////////////////////////////////////
 // ░░  CONSTANTS  ░░
@@ -103,11 +102,9 @@ const poseidonHashHex = async (
 };
 
 /* — BLAKE3( hex ) → 64-char hex (lower-case) — */
-const blake3HashHex = (hexInput: string): string => {
-  const bytes = Uint8Array.from(
-    hexInput.match(/.{1,2}/g)!.map((b) => Number.parseInt(b, 16)),
-  );
-  return bytesToHex(blake3(bytes));
+const blake3HashHex = async (hexInput: string): Promise<string> => {
+  const bytes = hexToBytes(hexInput);
+  return blake3Hex(bytes);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
