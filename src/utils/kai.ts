@@ -8,7 +8,7 @@
 ────────────────────────────────────────────────────────────────── */
 
 ////////////////////////////////////////////////////////////////////////////////
-// ░░  DEPENDENCIES  ░░  (Poseidon is loaded lazily to shrink bundle size)
+// ░░  DEPENDENCIES  ░░
 ////////////////////////////////////////////////////////////////////////////////
 
 import { blake3Hex, hexToBytes } from "../lib/hash";
@@ -37,52 +37,6 @@ export const getCurrentKaiPulse = (now: number = Date.now()): number =>
 // ░░  INTERNAL HELPERS  ░░
 ////////////////////////////////////////////////////////////////////////////////
 
-/* — Poseidon loader — */
-type PoseidonFn = (inputs: bigint[]) => bigint;
-let poseidonFn: PoseidonFn | null = null;
-
-/** Runtime type-guard. */
-const isPoseidon = (f: unknown): f is PoseidonFn =>
-  typeof f === "function";
-
-/** Resolve *whatever* export shape snarkjs exposes, exactly once. */
-const getPoseidon = async (): Promise<PoseidonFn> => {
-  if (poseidonFn) return poseidonFn;
-
-  const mod: unknown = await import("snarkjs");
-
-  // Shape 1: named export  poseidon(...)
-  if (isPoseidon((mod as { poseidon?: unknown }).poseidon)) {
-    poseidonFn = (mod as { poseidon: PoseidonFn }).poseidon;
-    return poseidonFn;
-  }
-
-  // Shape 2: default export  function poseidon(...)
-  if (isPoseidon((mod as { default?: unknown }).default)) {
-    poseidonFn = (mod as { default: PoseidonFn }).default;
-    return poseidonFn;
-  }
-
-  // Shape 3: default export  { poseidon }
-  const defObj = (mod as { default?: unknown }).default;
-  if (
-    typeof defObj === "object" &&
-    defObj !== null &&
-    isPoseidon((defObj as { poseidon?: unknown }).poseidon)
-  ) {
-    poseidonFn = (defObj as { poseidon: PoseidonFn }).poseidon;
-    return poseidonFn;
-  }
-
-  // Shape 4: module itself is callable
-  if (isPoseidon(mod)) {
-    poseidonFn = mod;
-    return poseidonFn;
-  }
-
-  throw new Error("snarkjs: no callable Poseidon export found");
-};
-
 /* — UTF-8 → bigint (field element) — */
 const stringToBigInt = (s: string): bigint => {
   const hex = Array.from(new TextEncoder().encode(s), (b) =>
@@ -91,20 +45,25 @@ const stringToBigInt = (s: string): bigint => {
   return BigInt(`0x${hex || "0"}`);
 };
 
-/* — Poseidon⟨pulse,intention⟩ → 64-char hex — */
-const poseidonHashHex = async (
-  pulse: number,
-  intention: string,
-): Promise<string> => {
-  const poseidon = await getPoseidon();
-  const out = poseidon([BigInt(pulse), stringToBigInt(intention)]);
-  return out.toString(16).padStart(64, "0");
-};
-
 /* — BLAKE3( hex ) → 64-char hex (lower-case) — */
 const blake3HashHex = async (hexInput: string): Promise<string> => {
   const bytes = hexToBytes(hexInput);
   return blake3Hex(bytes);
+};
+
+const padHex64 = (hex: string): string => hex.padStart(64, "0");
+
+const inputsToHex = (inputs: readonly bigint[]): string =>
+  inputs.map((v) => padHex64(v.toString(16))).join("");
+
+const poseidonHashHex = async (inputs: readonly bigint[]): Promise<string> => {
+  const joined = inputsToHex(inputs);
+  return blake3HashHex(joined);
+};
+
+const poseidonHashBigInt = async (inputs: readonly bigint[]): Promise<bigint> => {
+  const hex = await poseidonHashHex(inputs);
+  return BigInt(`0x${hex}`);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -122,7 +81,7 @@ export const computeKaiSignature = async (
   pulse: number,
   intention: string = SYSTEM_INTENTION,
 ): Promise<string> => {
-  const poseidonHex = await poseidonHashHex(pulse, intention);
+  const poseidonHex = await poseidonHashHex([BigInt(pulse), stringToBigInt(intention)]);
   return blake3HashHex(poseidonHex);
 };
 
@@ -131,10 +90,9 @@ export const computeKaiSignature = async (
  * Used for per-payload ZK stamps without circular dependency on the payload.
  */
 export const computeZkPoseidonHash = async (hashHex: string): Promise<string> => {
-  const poseidon = await getPoseidon();
   const clean = hashHex.startsWith("0x") ? hashHex.slice(2) : hashHex;
   const hi = clean.slice(0, 32).padStart(32, "0");
   const lo = clean.slice(32).padEnd(32, "0");
-  const out = poseidon([BigInt(`0x${hi}`), BigInt(`0x${lo}`)]);
+  const out = await poseidonHashBigInt([BigInt(`0x${hi}`), BigInt(`0x${lo}`)]);
   return out.toString();
 };

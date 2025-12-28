@@ -165,6 +165,8 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
     intentionSigil,
     creatorPublicKey,
     origin,
+    canonicalShareUrl,
+    canonicalPayloadHash,
     onReady,
     onError,
     showZKBadge = true,
@@ -742,13 +744,22 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
       }
     }
 
-    if (shareAttr !== b.shareUrl) problems.push("data-share-url != built.shareUrl");
-    if (sigAttr && sigAttr !== b.payloadHashHex) problems.push("data-payload-hash != built.payloadHashHex");
+    const expectedShare =
+      typeof canonicalShareUrl === "string" && canonicalShareUrl.trim().length > 0
+        ? canonicalShareUrl.trim()
+        : b.shareUrl;
+    const expectedHash =
+      typeof canonicalPayloadHash === "string" && canonicalPayloadHash.trim().length > 0
+        ? canonicalPayloadHash.trim()
+        : b.payloadHashHex;
+
+    if (shareAttr !== expectedShare) problems.push("data-share-url != expected shareUrl");
+    if (sigAttr && sigAttr !== expectedHash) problems.push("data-payload-hash != expected payload hash");
 
     if (problems.length) {
       throw new Error(`[KaiSigil] Invariant violation → ${problems.join("; ")}`);
     }
-  }, [strict, built, stateKey, chakraDayKey, summaryForAttrs]);
+  }, [strict, built, stateKey, chakraDayKey, summaryForAttrs, canonicalShareUrl, canonicalPayloadHash]);
 
   const { toDataURL, exportBlob, verifySvgHash } = makeExporters(svgRef, size);
 
@@ -764,6 +775,18 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
   const zkPoseidonHash = stateKeyOk ? built?.zkPoseidonHash : undefined;
   const shareUrl = stateKeyOk ? built?.shareUrl : undefined;
 
+  const canonicalShareUrlClean =
+    typeof canonicalShareUrl === "string" && canonicalShareUrl.trim().length > 0
+      ? canonicalShareUrl.trim()
+      : undefined;
+  const canonicalPayloadHashClean =
+    typeof canonicalPayloadHash === "string" && canonicalPayloadHash.trim().length > 0
+      ? canonicalPayloadHash.trim()
+      : undefined;
+
+  const shareUrlForRender = canonicalShareUrlClean ?? shareUrl;
+  const payloadHashForRender = canonicalPayloadHashClean ?? payloadHashHex;
+
   const frequencyHz = (stateKeyOk ? built?.frequencyHz : undefined) ?? frequencyHzCurrent;
 
   const binaryForRender = useMemo(() => {
@@ -777,16 +800,16 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
     return bin.length > maxChars ? bin.slice(0, maxChars) : bin;
   }, [kaiSignature, size]);
 
-  const phaseColor = phaseColorFrom(hue, canon.visualClamped, payloadHashHex);
+  const phaseColor = phaseColorFrom(hue, canon.visualClamped, payloadHashForRender);
 
   const sigPathId = kaiSignature ? `${uid}-sig-path` : undefined;
   const descId = `${uid}-desc`;
 
-  const absoluteShareUrl = shareUrl;
+  const absoluteShareUrl = shareUrlForRender;
 
   const Wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     absoluteShareUrl ? (
-      <a href={absoluteShareUrl} target="_self" aria-label={`Open canonical sigil ${payloadHashHex ?? ""}`}>
+      <a href={absoluteShareUrl} target="_self" aria-label={`Open canonical sigil ${payloadHashForRender ?? ""}`}>
         {children}
       </a>
     ) : (
@@ -796,7 +819,7 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
     );
 
   const outerRingText = makeOuterRingText(
-    payloadHashHex,
+    payloadHashForRender,
     stateKeyOk,
     chakraDayKey,
     frequencyHz,
@@ -805,6 +828,45 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
     displayStepIndex,
     zkPoseidonHash
   );
+
+  const embeddedMetaJson = useMemo(() => {
+    const raw = stateKeyOk ? built?.embeddedMetaJson : undefined;
+    if (!raw || !shareUrlForRender) return raw;
+
+    const isObj = (v: unknown): v is Record<string, unknown> =>
+      typeof v === "object" && v !== null && !Array.isArray(v);
+
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!isObj(parsed)) return raw;
+
+      const next = { ...parsed } as Record<string, unknown>;
+
+      const header = next["header"];
+      if (isObj(header)) {
+        next["header"] = { ...header, shareUrl: shareUrlForRender };
+      }
+
+      if (typeof next["verifierUrl"] === "string") {
+        next["verifierUrl"] = shareUrlForRender;
+      }
+
+      const proofCapsule = next["proofCapsule"];
+      if (isObj(proofCapsule)) {
+        next["proofCapsule"] = { ...proofCapsule, verifierUrl: shareUrlForRender };
+      }
+
+      const proof = next["proof"];
+      if (isObj(proof)) {
+        next["proof"] = { ...proof, verifierUrl: shareUrlForRender };
+      }
+
+      return JSON.stringify(next);
+    } catch (err) {
+      console.debug("[KaiSigil] Failed to patch embedded metadata shareUrl", err);
+      return raw;
+    }
+  }, [built, stateKeyOk, shareUrlForRender]);
 
   const { ledgerJson, dhtJson } = useMemo(
     () => precomputeLedgerDht(stateKeyOk ? built?.embeddedMetaJson : undefined),
@@ -827,12 +889,24 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
       },
       uid,
       stepIndex: canon.stepIndex, // ✅ pulse-derived
-      payloadHashHex: built?.payloadHashHex,
-      sigilUrl: built?.sigilUrl,
+      payloadHashHex: payloadHashForRender,
+      sigilUrl: shareUrlForRender,
       userPhiKey,
       kaiSignature,
     }),
-    [toDataURL, exportBlob, verifySvgHash, built, stateKey, uid, canon.stepIndex, userPhiKey, kaiSignature]
+    [
+      toDataURL,
+      exportBlob,
+      verifySvgHash,
+      built,
+      stateKey,
+      uid,
+      canon.stepIndex,
+      userPhiKey,
+      kaiSignature,
+      payloadHashForRender,
+      shareUrlForRender,
+    ]
   );
 
   return (
@@ -853,7 +927,7 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
           "--dur": `${durMs}ms`,
           "--off": `${offMs}ms`,
           "--pulse": `${PULSE_MS}ms`,
-          cursor: shareUrl ? "pointer" : "default",
+          cursor: shareUrlForRender ? "pointer" : "default",
         } as React.CSSProperties
       }
       data-pulse={String(canon.pulse)}
@@ -869,10 +943,10 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
       data-golden-id={goldenId ?? undefined}
       data-kai-signature={kaiSignature ?? undefined}
       data-phi-key={userPhiKey ?? undefined}
-      data-payload-hash={payloadHashHex ?? undefined}
+      data-payload-hash={payloadHashForRender ?? undefined}
       data-zk-scheme={zkScheme ?? undefined}
       data-zk-poseidon-hash={zkPoseidonHash ?? undefined}
-      data-share-url={shareUrl || undefined}
+      data-share-url={shareUrlForRender || undefined}
       data-eternal-seal={eternalSeal ?? undefined}
       data-eternal-month={eternalMonth ?? undefined}
       data-harmonic-day={harmonicDay ?? undefined}
@@ -895,7 +969,7 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
       <MetadataBlocks
         uid={uid}
         stateKeyOk={stateKeyOk}
-        embeddedMetaJson={stateKeyOk ? built?.embeddedMetaJson : undefined}
+        embeddedMetaJson={embeddedMetaJson}
         klockIsoSnapshot={klockIsoSnapshot}
         apiSnapshot={apiSnapshot}
         extraEmbed={extraEmbed}
@@ -917,7 +991,7 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
         quality={quality}
         dpr={dpr}
         seed={seed}
-        payloadHashHex={payloadHashHex}
+        payloadHashHex={payloadHashForRender}
         auraPath={auraPath}
       />
 
