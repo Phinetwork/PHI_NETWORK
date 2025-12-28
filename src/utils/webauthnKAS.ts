@@ -171,14 +171,8 @@ export async function signBundleHash(phiKey: string, bundleHash: string) {
   const credIdBytes = base64UrlDecode(stored.credId);
   const challengeBytes = await sha256Bytes(`KAS-1|bundleHash|${bundleHash}`);
 
-  const challenge = challengeBytes.buffer.slice(
-    challengeBytes.byteOffset,
-    challengeBytes.byteOffset + challengeBytes.byteLength
-  );
-  const allowId = credIdBytes.buffer.slice(
-    credIdBytes.byteOffset,
-    credIdBytes.byteOffset + credIdBytes.byteLength
-  );
+  const challenge = challengeBytes.slice();
+  const allowId = credIdBytes.slice();
 
   const assertion = (await navigator.credentials.get({
     publicKey: {

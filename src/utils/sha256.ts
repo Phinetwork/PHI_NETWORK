@@ -7,10 +7,7 @@ function toBytes(input: string | Uint8Array): Uint8Array {
 
 export async function sha256Bytes(input: string | Uint8Array): Promise<Uint8Array> {
   const bytes = toBytes(input);
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-  );
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
   return new Uint8Array(digest);
 }
 
