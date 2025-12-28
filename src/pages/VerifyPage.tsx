@@ -128,7 +128,7 @@ export default function VerifyPage(): ReactElement {
         "Crown";
       const phiKey = result.derivedPhiKey;
       const verifierSlug = buildVerifierSlug(pulse, kaiSignature);
-      const capsule: ProofCapsuleV1 = {
+      const fallbackCapsule: ProofCapsuleV1 = {
         v: "KPV-1",
         pulse,
         chakraDay,
@@ -138,9 +138,10 @@ export default function VerifyPage(): ReactElement {
       };
 
       const svgHashNext = await hashSvgText(svgText);
+      const embedded = extractProofBundleMetaFromSvg(svgText);
+      const capsule = embedded?.proofCapsule ?? fallbackCapsule;
       const capsuleHashNext = await hashProofCapsuleV1(capsule);
       const bundleHashNext = await hashBundle(capsuleHashNext, svgHashNext);
-      const embedded = extractProofBundleMetaFromSvg(svgText);
 
       if (!active) return;
       setProofCapsule(capsule);
