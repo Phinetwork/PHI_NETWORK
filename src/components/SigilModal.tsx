@@ -21,7 +21,6 @@ import {
   type FC,
 } from "react";
 import { createPortal } from "react-dom";
-import html2canvas from "html2canvas";
 import JSZip from "jszip";
 
 /* Moment row (v22.9 UI) */
@@ -41,6 +40,7 @@ import {
   isWebAuthnAvailable,
   signBundleHash,
 } from "../utils/webauthnKAS";
+import { normalizeChakraDay } from "./KaiVoh/verifierProof";
 
 /* ✅ SINGLE SOURCE OF TRUTH: src/utils/kai_pulse.ts */
 import {
@@ -68,10 +68,6 @@ import { getKaiPulseToday, getSolarAlignedCounters, SOLAR_DAY_NAMES } from "../S
 ────────────────────────────────────────────────────────────────── */
 type TimeoutHandle = number; // window.setTimeout(...) -> number (browser)
 type IntervalHandle = number; // window.setInterval(...) -> number (browser)
-
-/* html2canvas typing compatibility (no unsafe casts, extra-props allowed) */
-type H2COptions = NonNullable<Parameters<typeof html2canvas>[1]>;
-type Loose<T> = T & Record<string, unknown>;
 
 interface Props {
   initialPulse?: number; // legacy/optional (modal still OPENS in LIVE)
@@ -564,67 +560,6 @@ const MintIcon: FC = () => (
     />
   </svg>
 );
-
-/* ────────────────────────────────────────────────────────────────
-   SVG metadata helpers
-────────────────────────────────────────────────────────────────── */
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-function ensureXmlns(svg: SVGSVGElement) {
-  if (!svg.getAttribute("xmlns")) svg.setAttribute("xmlns", SVG_NS);
-  if (!svg.getAttribute("xmlns:xlink")) {
-    svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-  }
-}
-
-function ensureMetadata(svg: SVGSVGElement): SVGMetadataElement {
-  const doc = svg.ownerDocument || document;
-  const existing = svg.querySelector("metadata");
-  if (existing) return existing as SVGMetadataElement;
-  const created = doc.createElementNS(SVG_NS, "metadata") as SVGMetadataElement;
-  svg.insertBefore(created, svg.firstChild);
-  return created;
-}
-
-function ensureDesc(svg: SVGSVGElement): SVGDescElement {
-  const doc = svg.ownerDocument || document;
-  const existing = svg.querySelector("desc");
-  if (existing) return existing as SVGDescElement;
-  const created = doc.createElementNS(SVG_NS, "desc") as SVGDescElement;
-  const meta = svg.querySelector("metadata");
-  if (meta && meta.nextSibling) svg.insertBefore(created, meta.nextSibling);
-  else svg.insertBefore(created, svg.firstChild);
-  return created;
-}
-
-function putMetadata(svg: SVGSVGElement, meta: unknown): string {
-  ensureXmlns(svg);
-
-  const metaEl = ensureMetadata(svg);
-  metaEl.textContent = JSON.stringify(meta);
-
-  const descEl = ensureDesc(svg);
-  const summary =
-    typeof meta === "object" && meta !== null
-      ? (() => {
-          const o = meta as Record<string, unknown>;
-          const p = typeof o.pulse === "number" ? o.pulse : undefined;
-          const px = typeof o.pulseExact === "string" ? o.pulseExact : undefined;
-          const b = typeof o.beat === "number" ? o.beat : undefined;
-          const s = typeof o.stepIndex === "number" ? o.stepIndex : undefined;
-          const c = typeof o.chakraDay === "string" ? o.chakraDay : undefined;
-          return `KaiSigil — pulse:${px ?? p ?? "?"} beat:${b ?? "?"} step:${s ?? "?"} chakra:${
-            c ?? "?"
-          }`;
-        })()
-      : "KaiSigil — exported";
-  descEl.textContent = summary;
-
-  const xml = new XMLSerializer().serializeToString(svg);
-  return xml.startsWith("<?xml")
-    ? xml
-    : `<?xml version="1.0" encoding="UTF-8"?>\n${xml}`;
-}
 
 /* ────────────────────────────────────────────────────────────────
    Clipboard helper
@@ -1152,43 +1087,6 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
   const getSVGElement = (): SVGSVGElement | null =>
     document.querySelector<SVGSVGElement>("#sigil-export svg");
 
-  const getSVGStringWithMetadata = (meta: unknown): string | null => {
-    const svg = getSVGElement();
-    if (!svg) return null;
-    return putMetadata(svg, meta);
-  };
-
-  const buildSVGBlob = (meta: unknown): Blob | null => {
-    const xml = getSVGStringWithMetadata(meta);
-    if (!xml) return null;
-    return new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
-  };
-
-  const buildPNGBlob = async (): Promise<Blob | null> => {
-    const el = document.getElementById("sigil-export");
-    if (!el) return null;
-
-    const opts: Loose<H2COptions> = {
-      background: undefined,
-      backgroundColor: null,
-    };
-
-    const canvas = await html2canvas(el, opts);
-
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), "image/png")
-    );
-    if (blob) return blob;
-
-    const dataUrl = canvas.toDataURL("image/png");
-    const base64 = dataUrl.split(",")[1] ?? "";
-    const byteStr = atob(base64);
-    const buf = new ArrayBuffer(byteStr.length);
-    const view = new Uint8Array(buf);
-    for (let i = 0; i < byteStr.length; i++) view[i] = byteStr.charCodeAt(i);
-    return new Blob([buf], { type: "image/png" });
-  };
-
   type SigilSharePayloadExtended = SigilSharePayload & {
     canonicalHash: string;
     exportedAt: string;
@@ -1276,53 +1174,6 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
     setSealOpen(true);
   };
 
-  const saveZipBundle = async () => {
-    const canTrustChildHash = pulse <= MAX_SAFE_BI;
-
-    const canonical = canTrustChildHash && lastHash ? String(lastHash).toLowerCase() : "";
-
-    const canonicalHash = canonical
-      ? canonical
-      : (await sha256Hex(
-          `pulseExact=${pulse.toString()}|beat=${kksDisplay.beat}|step=${kksDisplay.stepIndex}|chakra=${chakraDay}`
-        )).toLowerCase();
-
-    const meta = makeSharePayload(canonicalHash);
-
-    const [svgBlob, pngBlob] = await Promise.all([buildSVGBlob(meta), buildPNGBlob()]);
-    if (!svgBlob || !pngBlob) return;
-
-    const pulseSlugRaw = pulse.toString();
-    const pulseSlug =
-      pulseSlugRaw.length > 80
-        ? `${pulseSlugRaw.slice(0, 40)}_${pulseSlugRaw.slice(-20)}`
-        : pulseSlugRaw;
-
-    const zip = new JSZip();
-    zip.file(`sigil_${pulseSlug}.svg`, svgBlob);
-    zip.file(`sigil_${pulseSlug}.png`, pngBlob);
-
-    const manifest: SigilSharePayloadExtended & {
-      overlays: { qr: boolean; eternalPulseBar: boolean };
-    } = {
-      ...meta,
-      overlays: { qr: false, eternalPulseBar: false },
-    };
-    zip.file(`sigil_${pulseSlug}.manifest.json`, JSON.stringify(manifest, null, 2));
-
-    const zipBlob = await zip.generateAsync({ type: "blob" });
-    const url = URL.createObjectURL(zipBlob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `sigil_${pulseSlug}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    requestAnimationFrame(() => URL.revokeObjectURL(url));
-  };
-
   const exportProofBundle = async (): Promise<string | null> => {
     try {
       const svgEl = getSVGElement();
@@ -1331,18 +1182,49 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       const svgString = new XMLSerializer().serializeToString(svgEl);
       const kaiSignature = svgEl.getAttribute("data-kai-signature") ?? "";
       const phiKey = svgEl.getAttribute("data-phi-key") ?? "";
+      const payloadHashHex = svgEl.getAttribute("data-payload-hash") ?? "";
 
       if (!kaiSignature) return "Export failed: kaiSignature missing from SVG.";
       if (!phiKey) return "Export failed: Φ-Key missing from SVG.";
+      if (!payloadHashHex) return "Export failed: payload hash missing from SVG.";
 
       const pulseAttr = svgEl.getAttribute("data-pulse");
       const pulseParsed = pulseAttr ? Number.parseInt(pulseAttr, 10) : NaN;
-      const pulseNum = Number.isFinite(pulseParsed) ? pulseParsed : pulseForSigil;
+      if (!Number.isFinite(pulseParsed)) return "Export failed: pulse missing from SVG.";
+      const pulseNum = pulseParsed;
+
+      const beatAttr = svgEl.getAttribute("data-beat");
+      const beatParsed = beatAttr ? Number.parseInt(beatAttr, 10) : NaN;
+      if (!Number.isFinite(beatParsed)) return "Export failed: beat missing from SVG.";
+
+      const stepAttr = svgEl.getAttribute("data-step-index");
+      const stepParsed = stepAttr ? Number.parseInt(stepAttr, 10) : NaN;
+      if (!Number.isFinite(stepParsed)) return "Export failed: step index missing from SVG.";
+
+      const chakraAttr = svgEl.getAttribute("data-chakra-day");
+      const chakraNormalized = normalizeChakraDay(chakraAttr ?? undefined);
+      if (!chakraNormalized) return "Export failed: chakra day missing from SVG.";
+
+      const stepsPerBeatAttr = svgEl.getAttribute("data-steps-per-beat");
+      const stepsPerBeatParsed = stepsPerBeatAttr ? Number.parseInt(stepsPerBeatAttr, 10) : NaN;
+      const stepsPerBeat = Number.isFinite(stepsPerBeatParsed) ? stepsPerBeatParsed : STEPS_BEAT;
+
+      const sharePayload: SigilSharePayload = {
+        pulse: pulseNum,
+        beat: beatParsed,
+        stepIndex: stepParsed,
+        chakraDay: chakraNormalized,
+        stepsPerBeat,
+        kaiSignature,
+        userPhiKey: phiKey,
+      };
+
+      const verifierUrl = makeSigilUrl(payloadHashHex, sharePayload);
       const kaiSignatureShort = kaiSignature.slice(0, 10);
       const proofCapsule: ProofCapsule = {
         v: "KPV-1",
         pulse: pulseNum,
-        chakraDay,
+        chakraDay: chakraNormalized,
         kaiSignature,
         phiKey,
         verifierSlug: `${pulseNum}-${kaiSignatureShort}`,
@@ -1363,10 +1245,6 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       } else {
         warning = "Warning: WebAuthn unavailable — exporting without author signature.";
       }
-
-      const verifierUrl =
-        sealUrl || (typeof window !== "undefined" ? window.location.href : "");
-      if (!verifierUrl) return "Export failed: verifier URL is unavailable.";
 
       const proofBundle: ProofBundle = {
         hashAlg: "sha256",
