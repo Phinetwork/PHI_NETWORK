@@ -231,6 +231,11 @@ function safeFileExt(name: string): string {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+async function downloadSvgBlob(filename: string, blob: Blob): Promise<void> {
+  const text = await blob.text();
+  downloadSigil(filename, text);
+}
+
 /** Ensure the final SVG Blob actually contains the final merged metadata JSON. */
 async function embedMetadataIntoSvgBlob(svgBlob: Blob, metadata: unknown): Promise<Blob> {
   try {
@@ -584,6 +589,12 @@ function KaiVohFlow(): ReactElement {
     setStep("compose");
   };
 
+  const handleDownloadSealedSvg = async (): Promise<void> => {
+    if (!finalMedia) return;
+    if (finalMedia.type !== "image" || !finalMedia.content.type.includes("svg")) return;
+    await downloadSvgBlob(finalMedia.filename, finalMedia.content);
+  };
+
   /* ---------------------------------------------------------------------- */
   /*                          Embedding Kai Signature                       */
   /* ---------------------------------------------------------------------- */
@@ -872,6 +883,11 @@ function KaiVohFlow(): ReactElement {
             <button type="button" onClick={handleNewPost} className="kv-btn kv-btn-primary">
               + Exhale Memory
             </button>
+            {finalMedia?.type === "image" && finalMedia.content.type.includes("svg") ? (
+              <button type="button" onClick={() => void handleDownloadSealedSvg()} className="kv-btn kv-btn-ghost">
+                Download sealed SVG
+              </button>
+            ) : null}
             <button type="button" onClick={handleLogout} className="kv-btn kv-btn-ghost">
               ⏻ Inhale Memories
             </button>

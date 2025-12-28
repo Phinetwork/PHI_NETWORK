@@ -253,6 +253,7 @@ export type KaiTimeSourceOptions = {
   overridePulse?: number | bigint;
   snapshot?: SignedPulseSnapshot;
   clock?: PerfClock;
+  ignoreOverride?: boolean;
 };
 
 export class KaiTimeSource {
@@ -263,9 +264,11 @@ export class KaiTimeSource {
   constructor(options: KaiTimeSourceOptions = {}) {
     this.clock = options.clock ?? resolvePerfClock();
     const overridePulse =
-      options.overridePulse !== undefined
-        ? parsePulseNumber(options.overridePulse)
-        : readOverridePulse();
+      options.ignoreOverride
+        ? null
+        : options.overridePulse !== undefined
+          ? parsePulseNumber(options.overridePulse)
+          : readOverridePulse();
     const snapshot = options.snapshot ?? readSignedSnapshot();
 
     const snapshotMicro =
