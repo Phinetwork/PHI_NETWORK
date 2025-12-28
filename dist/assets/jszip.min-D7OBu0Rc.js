@@ -1,0 +1,1 @@
+import{B as e}from"./index-jczy_AAe.js";export default e();
