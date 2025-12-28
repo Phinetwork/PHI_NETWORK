@@ -56,7 +56,7 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 
 /* Kai-Klok φ-engine (KKS v1) */
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
-import { signHash } from "../../lib/sigil/signature";
+import { signHash, type HarmonicSig } from "../../lib/sigil/signature";
 
 /* Types */
 import type { PostEntry, SessionData } from "../session/sessionTypes";
@@ -103,7 +103,7 @@ type ExtendedKksMetadata = KaiSigKksMetadataShape & {
   bundleHash?: string;
   hashAlg?: string;
   canon?: string;
-  authorSig?: unknown;
+  authorSig?: HarmonicSig | null;
 
   /** KPV-1: canonical capsule used to compute proofHash */
   proofCapsule?: ProofCapsuleV1;
@@ -123,7 +123,7 @@ type VerifierData = Readonly<{
   capsuleHash: string;
   svgHash: string;
   bundleHash: string;
-  authorSig?: unknown;
+  authorSig?: HarmonicSig | null;
   proofHash: string;
 }>;
 
@@ -679,17 +679,17 @@ function KaiVohFlow(): ReactElement {
 
         let svgHash: string | undefined;
         let bundleHash: string | undefined;
-        let authorSig: unknown | undefined;
+        let authorSig: HarmonicSig | null = null;
 
         if (mediaRaw.type === "image" && content.type.includes("svg")) {
           const svgText = await content.text();
           svgHash = await hashSvgText(svgText);
           bundleHash = await hashBundle(capsuleHash, svgHash);
           try {
-            authorSig = await signHash(bundleHash);
+            authorSig = (await signHash(bundleHash)) ?? null;
           } catch (err) {
             console.warn("Author signature failed; continuing without authorSig.", err);
-            authorSig = undefined;
+            authorSig = null;
           }
 
           const proofBundle = {
@@ -701,7 +701,7 @@ function KaiVohFlow(): ReactElement {
             svgHash,
             bundleHash,
             verifierUrl,
-            authorSig: authorSig ?? null,
+            authorSig,
           };
 
           content = await embedProofMetadataIntoSvgBlob(content, proofBundle);
