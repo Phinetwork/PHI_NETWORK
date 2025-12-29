@@ -23,7 +23,7 @@ import {
 } from "./crypto";
 import { clean, type JSONDict } from "./utils";
 import { jwkToJSONLike } from "./identity";
-import type { Built, SigilPayloadExtended, ChakraDayKey } from "./types";
+import type { Built, SigilPayloadExtended, ChakraDayKey, ZkProof } from "./types";
 import type { SigilMetadataLite } from "../../utils/valuation";
 import { makeSigilUrl, type SigilSharePayload } from "../../utils/sigilUrl";
 import { computeZkPoseidonHash } from "../../utils/kai";
@@ -108,6 +108,12 @@ const chakraFromKey = (k: string): SigilSharePayload["chakraDay"] => {
   return "Crown";
 };
 
+const isZkProof = (value: unknown): value is ZkProof => {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return Array.isArray(rec.pi_a) && Array.isArray(rec.pi_b) && Array.isArray(rec.pi_c);
+};
+
 /* ─────────────────────────────────────────────────────────────
  * Main
  * ───────────────────────────────────────────────────────────── */
@@ -171,9 +177,8 @@ export async function buildEmbeddedBundle(args: {
 
   let zkPoseidonHash = "0x";
   let zkPoseidonSecret = "";
-  let zkProof: unknown;
+  let zkProof: ZkProof | null | undefined;
   let zkPublicInputs: string[] | undefined;
-  let proofHints = payloadObj.proofHints;
   let payloadObj: SigilPayloadExtended = {
     v: "1.0",
     kaiSignature: kaiSignature ?? "",
@@ -196,6 +201,8 @@ export async function buildEmbeddedBundle(args: {
     },
     zkPoseidonHash,
   };
+
+  let proofHints = payloadObj.proofHints;
 
   const canonicalPayloadBase: JSONDict = {
     v: payloadObj.v,
@@ -235,7 +242,7 @@ export async function buildEmbeddedBundle(args: {
       proofHints: payloadObj.proofHints,
     });
     if (generated) {
-      zkProof = generated.proof;
+      zkProof = isZkProof(generated.proof) ? generated.proof : null;
       zkPublicInputs = generated.zkPublicInputs;
       proofHints = generated.proofHints;
       payloadObj = { ...payloadObj, zkProof, proofHints };
