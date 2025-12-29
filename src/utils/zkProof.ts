@@ -4,6 +4,25 @@ function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && Object.keys(value).length > 0;
 }
 
+const DEFAULT_PROOF_HINTS: SigilProofHints = {
+  scheme: "groth16-poseidon",
+  api: "/api/proof/sigil",
+  explorer: "/keystream/hash/<hash>",
+};
+
+export function buildProofHints(
+  poseidonHash: string,
+  baseHints?: Partial<SigilProofHints>
+): SigilProofHints {
+  const merged: SigilProofHints = {
+    ...DEFAULT_PROOF_HINTS,
+    ...baseHints,
+  };
+  const explorer = merged.explorer || `/keystream/hash/${poseidonHash}`;
+  const normalizedExplorer = explorer.replace(/<hash>|\{hash\}/gi, poseidonHash);
+  return { ...merged, explorer: normalizedExplorer };
+}
+
 export async function generateZkProofFromPoseidonHash(params: {
   poseidonHash: string;
   secret?: string;
@@ -46,13 +65,10 @@ export async function generateZkProofFromPoseidonHash(params: {
       throw new Error("ZK public input mismatch");
     }
 
-    const proofHints: SigilProofHints = {
-      scheme: "groth16-poseidon",
-      api: "/api/proof/sigil",
-      explorer: `/keystream/hash/${poseidonHash}`,
+    const proofHints = buildProofHints(poseidonHash, {
       ...(params.proofHints ?? {}),
       ...(payload.proofHints ?? {}),
-    };
+    });
 
     return { proof: zkProof ?? null, proofHints, zkPublicInputs };
   } catch {
