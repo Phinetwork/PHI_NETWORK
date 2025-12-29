@@ -384,6 +384,26 @@ function extractStreamRefs(rawUrl: string): StreamRefs {
 /* ---------- loose readers (supports raw Capsule OR decoded.data payload) ---------- */
 
 function readCapsuleLoose(v: unknown): Capsule | null {
+  if (isObject(v) && isObject(v.proofCapsule)) {
+    const proof = v.proofCapsule as Record<string, unknown>;
+    const kaiSignature = isString(proof.kaiSignature) ? proof.kaiSignature : undefined;
+    const pulse = isNumber(proof.pulse) ? proof.pulse : undefined;
+    if (kaiSignature && typeof pulse === "number") {
+      const phiKey = isString(proof.phiKey) ? proof.phiKey : undefined;
+      const chakraDay =
+        isString(proof.chakraDay) || isNumber(proof.chakraDay)
+          ? (proof.chakraDay as string | number)
+          : undefined;
+      return {
+        kaiSignature,
+        pulse,
+        chakraDay,
+        phiKey,
+        userPhiKey: phiKey,
+      };
+    }
+  }
+
   // Most common: payload IS DecodedNodeData (has capsule)
   if (isObject(v) && isObject(v.capsule)) return v.capsule as Capsule;
 

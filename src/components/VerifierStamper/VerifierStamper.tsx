@@ -1672,6 +1672,30 @@ const VerifierStamperInner: React.FC = () => {
   const { used: childUsed, expired: childExpired } = useMemo(() => getChildLockInfo(meta, pulseNow), [meta, pulseNow]);
   const parentOpenExp = useMemo(() => getParentOpenExpiry(meta, pulseNow).expired, [meta, pulseNow]);
 
+  const zkSummary = useMemo(() => {
+    const hardened = meta?.hardenedTransfers ?? [];
+    if (!hardened.length) return null;
+    let send = 0;
+    let receive = 0;
+    let verifiedSend = 0;
+    let verifiedReceive = 0;
+    for (const t of hardened) {
+      if (t?.zkSend || t?.zkSendBundle) {
+        send += 1;
+        if (t?.zkSend?.verified) verifiedSend += 1;
+      }
+      if (t?.zkReceive || t?.zkReceiveBundle) {
+        receive += 1;
+        if (t?.zkReceive?.verified) verifiedReceive += 1;
+      }
+    }
+    if (!send && !receive) return null;
+    const parts: string[] = [];
+    if (send) parts.push(`send ${verifiedSend}/${send}`);
+    if (receive) parts.push(`receive ${verifiedReceive}/${receive}`);
+    return { send, receive, verifiedSend, verifiedReceive, label: parts.join(" • ") };
+  }, [meta]);
+
   const seriesKey = useMemo(() => {
     // canonical is best; fallback to core tuple so it still resets correctly
     if (canonical) return canonical;
@@ -1947,6 +1971,7 @@ const VerifierStamperInner: React.FC = () => {
                     {headProof && <KV k="Latest proof:" v={headProof.ok ? `#${headProof.index + 1} ✓` : `#${headProof.index} ×`} />}
                     {headProof !== null && <KV k="Head proof root:" v={headProof.root} wide mono />}
                     <KV k="Head proof root (v14):" v={(meta as SigilMetadataWithOptionals)?.transfersWindowRootV14 ?? "—"} wide mono />
+                    {zkSummary && <KV k="ZK proofs:" v={zkSummary.label} />}
 
                     {canonicalContext === "parent" &&
                       (() => {
@@ -2151,6 +2176,11 @@ const VerifierStamperInner: React.FC = () => {
 
                 {tab === "data" && (
                   <>
+                    {zkSummary && (
+                      <div className="summary-grid" style={{ marginBottom: 10 }}>
+                        <KV k="ZK proofs:" v={zkSummary.label} />
+                      </div>
+                    )}
                     <div className="json-toggle">
                       <label>
                         <input type="checkbox" checked={viewRaw} onChange={() => setViewRaw((v) => !v)} /> View raw JSON
