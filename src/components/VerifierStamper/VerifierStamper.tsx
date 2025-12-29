@@ -67,7 +67,7 @@ import { publishRotation } from "../verifier/utils/rotationBus";
 import { rewriteUrlPayload } from "../verifier/utils/urlPayload";
 import { safeShowDialog, switchModal } from "../verifier/utils/modal";
 import { getSigilGlobal } from "../verifier/utils/sigilGlobal";
-import { getFirst, fromSvgDataset } from "../verifier/utils/metaDataset";
+import { getFirst, getPath, fromSvgDataset } from "../verifier/utils/metaDataset";
 import JsonTree from "../verifier/ui/JsonTree";
 import StatusChips from "../verifier/ui/StatusChips";
 
@@ -1657,6 +1657,36 @@ const VerifierStamperInner: React.FC = () => {
     [meta]
   );
 
+  const zkPoseidonHash = useMemo(() => {
+    const raw = getPath(meta, "zkPoseidonHash") ?? getPath(meta, "proofHints.poseidonHash");
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      return trimmed.length ? trimmed : null;
+    }
+    return null;
+  }, [meta]);
+
+  const zkProof = useMemo(() => {
+    const raw = getPath(meta, "zkProof") ?? getPath(meta, "proofHints.proof");
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      return trimmed.length ? trimmed : null;
+    }
+    return raw;
+  }, [meta]);
+
+  const zkProofDisplay = useMemo(() => {
+    if (!zkProof) return null;
+    if (typeof zkProof === "string") return zkProof;
+    try {
+      return stableStringify(zkProof);
+    } catch (err) {
+      logError("zkProof.stringify", err);
+      return "[zkProof]";
+    }
+  }, [zkProof]);
+
   // Chakra: resolve from chakraDay or chakraGate (strips "gate" implicitly)
   const chakraDayDisplay = useMemo<ChakraDay | null>(() => resolveChakraDay(meta ?? {}), [meta]);
 
@@ -1985,6 +2015,8 @@ const VerifierStamperInner: React.FC = () => {
                     <KV k="Segment size:" v={meta.segmentSize ?? SEGMENT_SIZE} />
                     <KV k="Segment Depth:" v={meta.cumulativeTransfers ?? 0} />
                     <KV k="Segment Tree Root:" v={meta.segmentsMerkleRoot ?? "—"} wide mono />
+                    {zkPoseidonHash && <KV k="ZK Poseidon hash:" v={zkPoseidonHash} wide mono />}
+                    {zkProofDisplay && <KV k="ZK proof:" v={zkProofDisplay} wide mono />}
                     {rgbSeed && <KV k="RGB seed:" v={rgbSeed.join(", ")} />}
                   </div>
                 )}
@@ -2179,6 +2211,12 @@ const VerifierStamperInner: React.FC = () => {
                     {zkSummary && (
                       <div className="summary-grid" style={{ marginBottom: 10 }}>
                         <KV k="ZK proofs:" v={zkSummary.label} />
+                      </div>
+                    )}
+                    {(zkPoseidonHash || zkProofDisplay) && (
+                      <div className="summary-grid" style={{ marginBottom: 10 }}>
+                        {zkPoseidonHash && <KV k="ZK Poseidon hash:" v={zkPoseidonHash} wide mono />}
+                        {zkProofDisplay && <KV k="ZK proof:" v={zkProofDisplay} wide mono />}
                       </div>
                     )}
                     <div className="json-toggle">
