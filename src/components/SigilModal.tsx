@@ -1435,11 +1435,11 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
 
       let sealedSvg = embedProofMetadata(svgString, proofBundle);
       const svgHash = await sha256HexStrict(sealedSvg);
-      const bundleHash = await sha256HexStrict(
+      const computedBundleHash = await sha256HexStrict(
         jcsCanonicalize({ capsuleHash, svgHash })
       );
       proofBundle.svgHash = svgHash;
-      proofBundle.bundleHash = bundleHash;
+      proofBundle.bundleHash = computedBundleHash;
       sealedSvg = embedProofMetadata(sealedSvg, proofBundle);
       const baseName = `kai-voh_pulse-${pulseNum}_${kaiSignatureShort}`;
       const zip = new JSZip();
