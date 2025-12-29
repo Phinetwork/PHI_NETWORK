@@ -1,4 +1,5 @@
 import { XMLParser } from "fast-xml-parser";
+import { gunzipB64 } from "../lib/sigil/codec";
 import type { ProofCapsuleV1 } from "../components/KaiVoh/verifierProof";
 import type { HarmonicSig } from "../lib/sigil/signature";
 
@@ -21,6 +22,10 @@ export type EmbeddedMeta = {
   hashAlg?: string;
   canon?: string;
   authorSig?: HarmonicSig | null;
+  zkPoseidonHash?: string;
+  zkProof?: unknown;
+  proofHints?: unknown;
+  zkPublicInputs?: unknown;
   raw?: unknown;
 };
 
@@ -45,10 +50,24 @@ function safeJsonParse(s: string): unknown | null {
   }
 }
 
+function tryDecodeEmbeddedPayload(raw: Record<string, unknown>): Record<string, unknown> | null {
+  const payload = raw.payload;
+  if (typeof payload !== "string" || payload.trim().length === 0) return null;
+  try {
+    const bytes = gunzipB64(payload);
+    const text = new TextDecoder().decode(bytes);
+    const parsed = safeJsonParse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function toEmbeddedMetaFromUnknown(raw: unknown): EmbeddedMeta {
   if (!isRecord(raw)) return { raw };
 
   const capsuleRaw = isRecord(raw.proofCapsule) ? raw.proofCapsule : undefined;
+  const decodedPayload = tryDecodeEmbeddedPayload(raw);
 
   const kaiSignature =
     typeof raw.kaiSignature === "string"
@@ -113,6 +132,31 @@ function toEmbeddedMetaFromUnknown(raw: unknown): EmbeddedMeta {
       ? (capsuleRaw as ProofCapsuleV1)
       : undefined;
 
+  const zkPoseidonHash =
+    typeof raw.zkPoseidonHash === "string"
+      ? raw.zkPoseidonHash
+      : typeof decodedPayload?.zkPoseidonHash === "string"
+        ? decodedPayload.zkPoseidonHash
+        : undefined;
+  const zkProof =
+    "zkProof" in raw
+      ? raw.zkProof
+      : decodedPayload && "zkProof" in decodedPayload
+        ? decodedPayload.zkProof
+        : undefined;
+  const proofHints =
+    "proofHints" in raw
+      ? raw.proofHints
+      : decodedPayload && "proofHints" in decodedPayload
+        ? decodedPayload.proofHints
+        : undefined;
+  const zkPublicInputs =
+    "zkPublicInputs" in raw
+      ? raw.zkPublicInputs
+      : decodedPayload && "zkPublicInputs" in decodedPayload
+        ? decodedPayload.zkPublicInputs
+        : undefined;
+
   const capsuleHash = typeof raw.capsuleHash === "string" ? raw.capsuleHash : undefined;
   const svgHash = typeof raw.svgHash === "string" ? raw.svgHash : undefined;
   const bundleHash = typeof raw.bundleHash === "string" ? raw.bundleHash : undefined;
@@ -139,6 +183,10 @@ function toEmbeddedMetaFromUnknown(raw: unknown): EmbeddedMeta {
     hashAlg,
     canon,
     authorSig,
+    zkPoseidonHash,
+    zkProof,
+    proofHints,
+    zkPublicInputs,
     raw,
   };
 }
@@ -254,6 +302,10 @@ function findProofBundleInText(text: string): ProofBundleMeta | null {
         bundleHash: meta.bundleHash,
         verifierUrl: meta.verifierUrl,
         authorSig: meta.authorSig,
+        zkPoseidonHash: meta.zkPoseidonHash,
+        zkProof: meta.zkProof,
+        proofHints: meta.proofHints,
+        zkPublicInputs: meta.zkPublicInputs,
         raw: parsed,
       };
     }
@@ -280,6 +332,10 @@ function findProofBundleInText(text: string): ProofBundleMeta | null {
         bundleHash: meta.bundleHash,
         verifierUrl: meta.verifierUrl,
         authorSig: meta.authorSig,
+        zkPoseidonHash: meta.zkPoseidonHash,
+        zkProof: meta.zkProof,
+        proofHints: meta.proofHints,
+        zkPublicInputs: meta.zkPublicInputs,
         raw: blobParsed,
       };
     }
@@ -335,6 +391,8 @@ function extractAttrFallback(svgText: string): EmbeddedMeta {
   const chakraDay = getAttr(svgText, "data-harmonic-day") ?? getAttr(svgText, "data-chakra-day");
   const kaiSignature = getAttr(svgText, "data-kai-signature");
   const phiKey = getAttr(svgText, "data-phi-key");
+  const zkPoseidonHash = getAttr(svgText, "data-zk-poseidon-hash");
+  const zkPublicInputs = getAttr(svgText, "data-zk-public-inputs");
 
   return {
     pulse,
@@ -345,6 +403,8 @@ function extractAttrFallback(svgText: string): EmbeddedMeta {
     chakraGate,
     kaiSignature,
     phiKey,
+    zkPoseidonHash,
+    zkPublicInputs,
   };
 }
 
@@ -386,6 +446,10 @@ export type ProofBundleMeta = {
   bundleHash?: string;
   verifierUrl?: string;
   authorSig?: HarmonicSig | null;
+  zkPoseidonHash?: string;
+  zkProof?: unknown;
+  proofHints?: unknown;
+  zkPublicInputs?: unknown;
   raw?: unknown;
 };
 
@@ -409,6 +473,10 @@ export function extractProofBundleMetaFromSvg(svgText: string): ProofBundleMeta 
           bundleHash: meta.bundleHash,
           verifierUrl: meta.verifierUrl,
           authorSig: meta.authorSig,
+          zkPoseidonHash: meta.zkPoseidonHash,
+          zkProof: meta.zkProof,
+          proofHints: meta.proofHints,
+          zkPublicInputs: meta.zkPublicInputs,
           raw: parsed,
         };
       }

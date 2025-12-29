@@ -67,7 +67,7 @@ import { publishRotation } from "../verifier/utils/rotationBus";
 import { rewriteUrlPayload } from "../verifier/utils/urlPayload";
 import { safeShowDialog, switchModal } from "../verifier/utils/modal";
 import { getSigilGlobal } from "../verifier/utils/sigilGlobal";
-import { getFirst, fromSvgDataset } from "../verifier/utils/metaDataset";
+import { getFirst, getPath, fromSvgDataset } from "../verifier/utils/metaDataset";
 import JsonTree from "../verifier/ui/JsonTree";
 import StatusChips from "../verifier/ui/StatusChips";
 
@@ -1657,6 +1657,48 @@ const VerifierStamperInner: React.FC = () => {
     [meta]
   );
 
+  const zkPoseidonHash = useMemo(() => {
+    const raw = getPath(meta, "zkPoseidonHash") ?? getPath(meta, "proofHints.poseidonHash");
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      return trimmed.length ? trimmed : null;
+    }
+    return null;
+  }, [meta]);
+
+  const zkPublicInputs = useMemo(() => {
+    const raw = getPath(meta, "zkPublicInputs");
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === "string") return raw;
+    try {
+      return stableStringify(raw);
+    } catch (err) {
+      logError("zkPublicInputs.stringify", err);
+      return "[zkPublicInputs]";
+    }
+  }, [meta]);
+
+  const zkProof = useMemo(() => {
+    const raw = getPath(meta, "zkProof") ?? getPath(meta, "proofHints.proof");
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      return trimmed.length ? trimmed : null;
+    }
+    return raw;
+  }, [meta]);
+
+  const zkProofDisplay = useMemo(() => {
+    if (!zkProof) return null;
+    if (typeof zkProof === "string") return zkProof;
+    try {
+      return stableStringify(zkProof);
+    } catch (err) {
+      logError("zkProof.stringify", err);
+      return "[zkProof]";
+    }
+  }, [zkProof]);
+
   // Chakra: resolve from chakraDay or chakraGate (strips "gate" implicitly)
   const chakraDayDisplay = useMemo<ChakraDay | null>(() => resolveChakraDay(meta ?? {}), [meta]);
 
@@ -1671,6 +1713,30 @@ const VerifierStamperInner: React.FC = () => {
 
   const { used: childUsed, expired: childExpired } = useMemo(() => getChildLockInfo(meta, pulseNow), [meta, pulseNow]);
   const parentOpenExp = useMemo(() => getParentOpenExpiry(meta, pulseNow).expired, [meta, pulseNow]);
+
+  const zkSummary = useMemo(() => {
+    const hardened = meta?.hardenedTransfers ?? [];
+    if (!hardened.length) return null;
+    let send = 0;
+    let receive = 0;
+    let verifiedSend = 0;
+    let verifiedReceive = 0;
+    for (const t of hardened) {
+      if (t?.zkSend || t?.zkSendBundle) {
+        send += 1;
+        if (t?.zkSend?.verified) verifiedSend += 1;
+      }
+      if (t?.zkReceive || t?.zkReceiveBundle) {
+        receive += 1;
+        if (t?.zkReceive?.verified) verifiedReceive += 1;
+      }
+    }
+    if (!send && !receive) return null;
+    const parts: string[] = [];
+    if (send) parts.push(`send ${verifiedSend}/${send}`);
+    if (receive) parts.push(`receive ${verifiedReceive}/${receive}`);
+    return { send, receive, verifiedSend, verifiedReceive, label: parts.join(" • ") };
+  }, [meta]);
 
   const seriesKey = useMemo(() => {
     // canonical is best; fallback to core tuple so it still resets correctly
@@ -1947,6 +2013,7 @@ const VerifierStamperInner: React.FC = () => {
                     {headProof && <KV k="Latest proof:" v={headProof.ok ? `#${headProof.index + 1} ✓` : `#${headProof.index} ×`} />}
                     {headProof !== null && <KV k="Head proof root:" v={headProof.root} wide mono />}
                     <KV k="Head proof root (v14):" v={(meta as SigilMetadataWithOptionals)?.transfersWindowRootV14 ?? "—"} wide mono />
+                    {zkSummary && <KV k="ZK proofs:" v={zkSummary.label} />}
 
                     {canonicalContext === "parent" &&
                       (() => {
@@ -1960,6 +2027,9 @@ const VerifierStamperInner: React.FC = () => {
                     <KV k="Segment size:" v={meta.segmentSize ?? SEGMENT_SIZE} />
                     <KV k="Segment Depth:" v={meta.cumulativeTransfers ?? 0} />
                     <KV k="Segment Tree Root:" v={meta.segmentsMerkleRoot ?? "—"} wide mono />
+                    {zkPoseidonHash && <KV k="ZK Poseidon hash:" v={zkPoseidonHash} wide mono />}
+                    {zkPublicInputs && <KV k="ZK public inputs:" v={zkPublicInputs} wide mono />}
+                    {zkProofDisplay && <KV k="ZK proof:" v={zkProofDisplay} wide mono />}
                     {rgbSeed && <KV k="RGB seed:" v={rgbSeed.join(", ")} />}
                   </div>
                 )}
@@ -2151,6 +2221,18 @@ const VerifierStamperInner: React.FC = () => {
 
                 {tab === "data" && (
                   <>
+                    {zkSummary && (
+                      <div className="summary-grid" style={{ marginBottom: 10 }}>
+                        <KV k="ZK proofs:" v={zkSummary.label} />
+                      </div>
+                    )}
+                    {(zkPoseidonHash || zkProofDisplay) && (
+                      <div className="summary-grid" style={{ marginBottom: 10 }}>
+                        {zkPoseidonHash && <KV k="ZK Poseidon hash:" v={zkPoseidonHash} wide mono />}
+                        {zkPublicInputs && <KV k="ZK public inputs:" v={zkPublicInputs} wide mono />}
+                        {zkProofDisplay && <KV k="ZK proof:" v={zkProofDisplay} wide mono />}
+                      </div>
+                    )}
                     <div className="json-toggle">
                       <label>
                         <input type="checkbox" checked={viewRaw} onChange={() => setViewRaw((v) => !v)} /> View raw JSON
