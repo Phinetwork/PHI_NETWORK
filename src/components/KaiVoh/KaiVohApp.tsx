@@ -57,6 +57,8 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 /* Kai-Klok φ-engine (KKS v1) */
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
 import { signHash, type HarmonicSig } from "../../lib/sigil/signature";
+import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
+import type { SigilProofHints } from "../../types/sigil";
 
 /* Types */
 import type { PostEntry, SessionData } from "../session/sessionTypes";
@@ -703,6 +705,42 @@ function KaiVohFlow(): ReactElement {
             authorSig = null;
           }
 
+          const zkPoseidonHash =
+            typeof (mergedMetadata as { zkPoseidonHash?: unknown }).zkPoseidonHash === "string"
+              ? (mergedMetadata as { zkPoseidonHash?: string }).zkPoseidonHash
+              : undefined;
+          let zkProof = (mergedMetadata as { zkProof?: unknown }).zkProof;
+          let proofHints = (mergedMetadata as { proofHints?: unknown }).proofHints;
+          let zkPublicInputs: unknown = (mergedMetadata as { zkPublicInputs?: unknown }).zkPublicInputs;
+
+          if (zkPoseidonHash) {
+            const proofObj =
+              zkProof && typeof zkProof === "object" ? (zkProof as Record<string, unknown>) : null;
+            const hasProof =
+              typeof zkProof === "string"
+                ? zkProof.trim().length > 0
+                : Array.isArray(zkProof)
+                  ? zkProof.length > 0
+                  : proofObj
+                    ? Object.keys(proofObj).length > 0
+                    : false;
+
+            if (!hasProof) {
+              const generated = await generateZkProofFromPoseidonHash({
+                poseidonHash: zkPoseidonHash,
+                proofHints:
+                  typeof proofHints === "object" && proofHints !== null
+                    ? (proofHints as SigilProofHints)
+                    : undefined,
+              });
+              if (generated) {
+                zkProof = generated.proof;
+                proofHints = generated.proofHints;
+                zkPublicInputs = generated.zkPublicInputs;
+              }
+            }
+          }
+
           const proofBundle = {
             v: "KPB-1",
             hashAlg: PROOF_HASH_ALG,
@@ -713,6 +751,10 @@ function KaiVohFlow(): ReactElement {
             bundleHash,
             verifierUrl,
             authorSig,
+            zkPoseidonHash,
+            zkProof,
+            proofHints,
+            zkPublicInputs,
           };
 
           content = await embedProofMetadataIntoSvgBlob(content, proofBundle);
