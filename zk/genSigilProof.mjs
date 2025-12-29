@@ -1,6 +1,7 @@
 // zk/genSigilProof.mjs
 import fs from "fs";
 import { execSync } from "child_process";
+import { buildPoseidonOpt } from "circomlibjs";
 
 const run = async () => {
   const secretInput = process.argv[2];
@@ -11,7 +12,8 @@ const run = async () => {
   }
 
   const secret = BigInt(secretInput);
-  const expectedHash = secret.toString();
+  const poseidon = await buildPoseidonOpt();
+  const expectedHash = poseidon.F.toObject(poseidon([secret])).toString();
 
   console.log("🔐 Expected Hash:", expectedHash);
 
