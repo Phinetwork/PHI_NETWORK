@@ -40,7 +40,7 @@ import { jcsCanonicalize } from "../utils/jcs";
 import { sha256Hex as sha256HexStrict } from "../utils/sha256";
 import { embedProofMetadata, svgCanonicalForHash } from "../utils/svgProof";
 import { extractEmbeddedMetaFromSvg } from "../utils/sigilMetadata";
-import { generateZkProofFromPoseidonHash } from "../utils/zkProof";
+import { buildProofHints, generateZkProofFromPoseidonHash } from "../utils/zkProof";
 import {
   ensurePasskey,
   isWebAuthnAvailable,
@@ -1364,15 +1364,21 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
           const generated = await generateZkProofFromPoseidonHash({
             poseidonHash: zkPoseidonHash,
             secret: secretForProof,
-            proofHints: typeof proofHints === "object" && proofHints !== null
-              ? (proofHints as SigilProofHints)
-              : undefined,
+            proofHints:
+              typeof proofHints === "object" && proofHints !== null
+                ? (proofHints as SigilProofHints)
+                : undefined,
           });
           if (generated) {
             zkProof = generated.proof;
             proofHints = generated.proofHints;
             zkPublicInputs = generated.zkPublicInputs;
           }
+        }
+        if (typeof proofHints !== "object" || proofHints === null) {
+          proofHints = buildProofHints(zkPoseidonHash);
+        } else {
+          proofHints = buildProofHints(zkPoseidonHash, proofHints as SigilProofHints);
         }
       }
       if (zkPoseidonHash && zkPublicInputs) {

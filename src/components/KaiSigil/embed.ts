@@ -27,7 +27,7 @@ import type { Built, SigilPayloadExtended, ChakraDayKey, ZkProof } from "./types
 import type { SigilMetadataLite } from "../../utils/valuation";
 import { makeSigilUrl, type SigilSharePayload } from "../../utils/sigilUrl";
 import { computeZkPoseidonHash } from "../../utils/kai";
-import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
+import { buildProofHints, generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 
 /* ─────────────────────────────────────────────────────────────
  * STRICT CONVERSION: guarantee ArrayBuffer (not SharedArrayBuffer)
@@ -234,6 +234,8 @@ export async function buildEmbeddedBundle(args: {
   zkPoseidonHash = poseidonResult.hash;
   zkPoseidonSecret = poseidonResult.secret;
   payloadObj = { ...payloadObj, zkPoseidonHash };
+  proofHints = buildProofHints(zkPoseidonHash, proofHints);
+  payloadObj = { ...payloadObj, proofHints };
 
   if (typeof window !== "undefined") {
     const generated = await generateZkProofFromPoseidonHash({

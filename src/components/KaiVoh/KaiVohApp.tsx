@@ -58,7 +58,7 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
 import { signHash, type HarmonicSig } from "../../lib/sigil/signature";
 import { computeZkPoseidonHash } from "../../utils/kai";
-import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
+import { buildProofHints, generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import type { SigilProofHints } from "../../types/sigil";
 
 /* Types */
@@ -781,6 +781,11 @@ function KaiVohFlow(): ReactElement {
                 proofHints = generated.proofHints;
                 zkPublicInputs = generated.zkPublicInputs;
               }
+            }
+            if (typeof proofHints !== "object" || proofHints === null) {
+              proofHints = buildProofHints(zkPoseidonHash);
+            } else {
+              proofHints = buildProofHints(zkPoseidonHash, proofHints as SigilProofHints);
             }
           }
           if (zkPoseidonHash && zkPublicInputs) {
