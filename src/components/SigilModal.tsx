@@ -41,6 +41,7 @@ import { sha256Hex as sha256HexStrict } from "../utils/sha256";
 import { embedProofMetadata, svgCanonicalForHash } from "../utils/svgProof";
 import { extractEmbeddedMetaFromSvg } from "../utils/sigilMetadata";
 import { buildProofHints, generateZkProofFromPoseidonHash } from "../utils/zkProof";
+import { computeZkPoseidonHash } from "../utils/kai";
 import {
   ensurePasskey,
   isWebAuthnAvailable,
@@ -1328,7 +1329,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
 
       const svgString = new XMLSerializer().serializeToString(svgClone);
       const embeddedMeta = extractEmbeddedMetaFromSvg(svgString);
-      const zkPoseidonHash =
+      let zkPoseidonHash =
         typeof embeddedMeta.zkPoseidonHash === "string" &&
         embeddedMeta.zkPoseidonHash.trim().length > 0
           ? embeddedMeta.zkPoseidonHash.trim()
@@ -1336,6 +1337,11 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       let zkProof = embeddedMeta.zkProof;
       let proofHints = embeddedMeta.proofHints;
       let zkPublicInputs: unknown = embeddedMeta.zkPublicInputs;
+
+      if (!zkPoseidonHash && payloadHashHex) {
+        const computed = await computeZkPoseidonHash(payloadHashHex);
+        zkPoseidonHash = computed.hash;
+      }
 
       if (zkPoseidonHash) {
         const proofObj =
@@ -1351,10 +1357,17 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
                 ? Object.keys(proofObj).length > 0
                 : false;
 
-        const secretForProof =
+        let secretForProof =
           typeof zkPoseidonSecret === "string" && zkPoseidonSecret.trim().length > 0
             ? zkPoseidonSecret.trim()
             : undefined;
+
+        if (!secretForProof && payloadHashHex) {
+          const computed = await computeZkPoseidonHash(payloadHashHex);
+          if (computed.hash === zkPoseidonHash) {
+            secretForProof = computed.secret;
+          }
+        }
 
         if (!hasProof && !secretForProof) {
           throw new Error("ZK secret missing for proof generation");
