@@ -40,12 +40,14 @@ import { jcsCanonicalize } from "../utils/jcs";
 import { sha256Hex as sha256HexStrict } from "../utils/sha256";
 import { embedProofMetadata, svgCanonicalForHash } from "../utils/svgProof";
 import { extractEmbeddedMetaFromSvg } from "../utils/sigilMetadata";
+import { generateZkProofFromPoseidonHash } from "../utils/zkProof";
 import {
   ensurePasskey,
   isWebAuthnAvailable,
   signBundleHash,
 } from "../utils/webauthnKAS";
 import { normalizeChakraDay } from "./KaiVoh/verifierProof";
+import type { SigilProofHints } from "../types/sigil";
 
 /* ✅ SINGLE SOURCE OF TRUTH: src/utils/kai_pulse.ts */
 import {
@@ -1306,8 +1308,36 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
         embeddedMeta.zkPoseidonHash.trim().length > 0
           ? embeddedMeta.zkPoseidonHash.trim()
           : undefined;
-      const zkProof = embeddedMeta.zkProof;
-      const proofHints = embeddedMeta.proofHints;
+      let zkProof = embeddedMeta.zkProof;
+      let proofHints = embeddedMeta.proofHints;
+
+      if (zkPoseidonHash) {
+        const proofObj =
+          zkProof && typeof zkProof === "object"
+            ? (zkProof as Record<string, unknown>)
+            : null;
+        const hasProof =
+          typeof zkProof === "string"
+            ? zkProof.trim().length > 0
+            : Array.isArray(zkProof)
+              ? zkProof.length > 0
+              : proofObj
+                ? Object.keys(proofObj).length > 0
+                : false;
+
+        if (!hasProof) {
+          const generated = await generateZkProofFromPoseidonHash({
+            poseidonHash: zkPoseidonHash,
+            proofHints: typeof proofHints === "object" && proofHints !== null
+              ? (proofHints as SigilProofHints)
+              : undefined,
+          });
+          if (generated) {
+            zkProof = generated.proof;
+            proofHints = generated.proofHints;
+          }
+        }
+      }
       const svgHash = await sha256HexStrict(svgCanonicalForHash(svgString));
       const bundleHash = await sha256HexStrict(
         jcsCanonicalize({ capsuleHash, svgHash })
