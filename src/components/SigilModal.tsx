@@ -1356,6 +1356,10 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
             ? zkPoseidonSecret.trim()
             : undefined;
 
+        if (!hasProof && !secretForProof) {
+          throw new Error("ZK secret missing for proof generation");
+        }
+
         if (!hasProof && secretForProof) {
           const generated = await generateZkProofFromPoseidonHash({
             poseidonHash: zkPoseidonHash,

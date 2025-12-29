@@ -77,6 +77,11 @@ export async function generateSigilProof({
     zkPoseidonHash: publicInput0,
     zkProof: normalizedProof,
     zkPublicInputs: normalizedSignals,
+    proofHints: {
+      scheme: "groth16-poseidon",
+      api: "/api/proof/sigil",
+      explorer: `/keystream/hash/${publicInput0}`,
+    },
   };
 }
 
