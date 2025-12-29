@@ -52,7 +52,7 @@ import {
   type ProofCapsuleV1,
 } from "./KaiVoh/verifierProof";
 import type { AuthorSig } from "../utils/authorSig";
-import { signBundleHash } from "../utils/webauthnKAS";
+import { ensurePasskey, signBundleHash } from "../utils/webauthnKAS";
 import type { SigilProofHints } from "../types/sigil";
 
 /* ✅ SINGLE SOURCE OF TRUTH: src/utils/kai_pulse.ts */
@@ -1426,6 +1426,7 @@ const SigilModal: FC<Props> = ({ onClose }: Props) => {
       const computedBundleHash = await hashBundle(bundleUnsigned);
       let authorSig: AuthorSig | null = null;
       try {
+        await ensurePasskey(phiKey);
         authorSig = await signBundleHash(phiKey, computedBundleHash);
       } catch (err) {
         console.warn("Author signature failed; continuing without authorSig.", err);

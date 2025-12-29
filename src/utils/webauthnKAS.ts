@@ -227,35 +227,39 @@ export async function verifyBundleAuthorSig(
   bundleHash: string,
   authorSig: KASAuthorSig
 ): Promise<boolean> {
-  const expectedChallenge = await sha256Bytes(`KAS-1|bundleHash|${bundleHash}`);
-  const expectedChallengeB64 = base64UrlEncode(expectedChallenge);
-  if (authorSig.challenge !== expectedChallengeB64) return false;
-
-  let clientData: { challenge?: string } | null = null;
   try {
+    const expectedChallenge = await sha256Bytes(`KAS-1|bundleHash|${bundleHash}`);
+    const expectedChallengeB64 = base64UrlEncode(expectedChallenge);
+    if (authorSig.challenge !== expectedChallengeB64) return false;
+
+    let clientData: { challenge?: string } | null = null;
+    try {
+      const clientDataBytes = base64UrlDecode(authorSig.clientDataJSON);
+      const clientDataText = new TextDecoder().decode(clientDataBytes);
+      const parsed = JSON.parse(clientDataText) as { challenge?: string };
+      clientData = parsed;
+    } catch {
+      return false;
+    }
+
+    if (!clientData || clientData.challenge !== expectedChallengeB64) return false;
+
+    const authenticatorData = base64UrlDecode(authorSig.authenticatorData);
     const clientDataBytes = base64UrlDecode(authorSig.clientDataJSON);
-    const clientDataText = new TextDecoder().decode(clientDataBytes);
-    const parsed = JSON.parse(clientDataText) as { challenge?: string };
-    clientData = parsed;
+    const clientDataHash = await sha256Bytes(clientDataBytes);
+    const signedPayload = concatBytes(authenticatorData, clientDataHash);
+    const signatureBytes = base64UrlDecode(authorSig.signature);
+
+    const pubKey = await importP256Jwk(authorSig.pubKeyJwk);
+    return crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      pubKey,
+      toArrayBuffer(signatureBytes),
+      toArrayBuffer(signedPayload)
+    );
   } catch {
     return false;
   }
-
-  if (!clientData || clientData.challenge !== expectedChallengeB64) return false;
-
-  const authenticatorData = base64UrlDecode(authorSig.authenticatorData);
-  const clientDataBytes = base64UrlDecode(authorSig.clientDataJSON);
-  const clientDataHash = await sha256Bytes(clientDataBytes);
-  const signedPayload = concatBytes(authenticatorData, clientDataHash);
-  const signatureBytes = base64UrlDecode(authorSig.signature);
-
-  const pubKey = await importP256Jwk(authorSig.pubKeyJwk);
-  return crypto.subtle.verify(
-    { name: "ECDSA", hash: "SHA-256" },
-    pubKey,
-    toArrayBuffer(signatureBytes),
-    toArrayBuffer(signedPayload)
-  );
 }
 
 export function isWebAuthnAvailable(): boolean {

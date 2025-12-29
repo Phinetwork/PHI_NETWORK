@@ -58,7 +58,7 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 /* Kai-Klok φ-engine (KKS v1) */
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
 import type { AuthorSig } from "../../utils/authorSig";
-import { signBundleHash } from "../../utils/webauthnKAS";
+import { ensurePasskey, signBundleHash } from "../../utils/webauthnKAS";
 import { computeZkPoseidonHash } from "../../utils/kai";
 import { buildProofHints, generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import type { SigilProofHints } from "../../types/sigil";
@@ -796,6 +796,7 @@ function KaiVohFlow(): ReactElement {
           });
           bundleHash = await hashBundle(bundleUnsigned);
           try {
+            await ensurePasskey(proofPhiKey);
             authorSig = await signBundleHash(proofPhiKey, bundleHash);
           } catch (err) {
             console.warn("Author signature failed; continuing without authorSig.", err);
