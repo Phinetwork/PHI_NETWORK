@@ -384,7 +384,7 @@
       </div>
       <div class="grid">
         <div class="stack"><label class="hint">Now (pulses/day 17,491.270421)</label><input id="val-nowpulse" readonly class="out" /></div>
-        <div class="stack"><label class="hint">USD sample (issuance)</label><input id="val-usd-sample" readonly class="out" /></div>
+        <div class="stack"><label class="hint">—</label><input readonly class="out" value="" /></div>
       </div>
       <div class="row">
         <div></div>
@@ -1682,7 +1682,7 @@ $("pv-pdf")?.addEventListener("change", (e) => {
       }
 
       function clearValuation() {
-        for (const id of ["val-live","val-premium","val-alg","val-stamp","val-computed","val-nowpulse","val-received-phi","val-received-usd","val-usd-per-phi","val-usd-sample","val-total-usd"]) $(id).value = "";
+        for (const id of ["val-live","val-premium","val-alg","val-stamp","val-computed","val-nowpulse","val-received-phi","val-received-usd","val-usd-per-phi","val-total-usd"]) $(id).value = "";
       }
       window.clearValuation = clearValuation;
 
@@ -1716,7 +1716,6 @@ $("pv-pdf")?.addEventListener("change", (e) => {
         $("val-received-phi").value = receivedPhi != null ? fmtPhi(receivedPhi) : "";
         $("val-received-usd").value = receivedUsd != null ? fmtUsd(receivedUsd) : "";
         $("val-usd-per-phi").value = Number.isFinite(usdPerPhi) ? fmtUsd(usdPerPhi) : "";
-        $("val-usd-sample").value = String(USD_SAMPLE);
         $("val-total-usd").value = totalUsd != null ? fmtUsd(totalUsd) : "";
       }
 
