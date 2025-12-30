@@ -1913,7 +1913,7 @@ const VerifierStamperInner: React.FC = () => {
     if (receiveSig) {
       const bundleRaw = proofBundleMeta?.raw;
       const nextBundle = isRecord(bundleRaw) ? { ...bundleRaw, receiveSig } : { receiveSig };
-      const baseSvg = sigilSvgRaw?.trim() ? sigilSvgRaw : await fetch(durl).then((r) => r.text());
+      const baseSvg = sigilSvgRaw?.trim() ? sigilSvgRaw : await fetch(svgURL).then((r) => r.text());
       const updatedSvg = embedProofMetadata(baseSvg, nextBundle);
       durl = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(updatedSvg)))}`;
     }

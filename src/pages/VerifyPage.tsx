@@ -455,7 +455,7 @@ export default function VerifyPage(): ReactElement {
       setReceiveSigVerified(null);
       return;
     }
-    const embeddedReceive = readReceiveSigFromBundle(embeddedProof?.raw);
+    const embeddedReceive = readReceiveSigFromBundle(embeddedProof?.raw ?? result.embedded.raw);
     if (embeddedReceive) {
       setReceiveSig(embeddedReceive);
       return;
