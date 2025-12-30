@@ -177,14 +177,14 @@ export async function centrePixelSignature(url: string, pulseForSeal: number) {
 }
 
 /* embed updated <metadata> JSON into SVG and return data: URL */
+const MAIN_METADATA_REGEX = /<metadata\b(?![^>]*\bid=["']kai-voh-proof["'])[^>]*>[\s\S]*?<\/metadata>/i;
+
 export function embedMetadataText(svgText: string, meta: SigilMetadata): string {
   const json = JSON.stringify(meta, null, 2);
-  return svgText.match(/<metadata[^>]*>/i)
-    ? svgText.replace(
-        /<metadata[^>]*>[\s\S]*?<\/metadata>/i,
-        `<metadata>${json}</metadata>`
-      )
-    : svgText.replace(/<svg([^>]*)>/i, `<svg$1><metadata>${json}</metadata>`);
+  if (MAIN_METADATA_REGEX.test(svgText)) {
+    return svgText.replace(MAIN_METADATA_REGEX, `<metadata>${json}</metadata>`);
+  }
+  return svgText.replace(/<svg([^>]*)>/i, `<svg$1><metadata>${json}</metadata>`);
 }
 
 export async function embedMetadata(svgURL: string, meta: SigilMetadata) {

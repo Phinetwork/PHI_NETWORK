@@ -96,7 +96,7 @@ import { buildMerkleRoot, merkleProof, verifyProof } from "./merkle";
 import { sealCurrentWindowIntoSegment } from "./segments";
 import { verifyHistorical } from "./verifyHistorical";
 import { verifyZkOnHead } from "./zk";
-import { embedProofMetadata, stripProofMetadata } from "../../utils/svgProof";
+import { embedProofMetadata } from "../../utils/svgProof";
 import { extractProofBundleMetaFromSvg, type ProofBundleMeta } from "../../utils/sigilMetadata";
 import { DEFAULT_ISSUANCE_POLICY, quotePhiForUsd } from "../../utils/phi-issuance";
 import { BREATH_MS } from "../valuation/constants";
@@ -1581,12 +1581,13 @@ const VerifierStamperInner: React.FC = () => {
       senderKaiPulse: nowPulse,
       payload: chosenPayload ?? undefined,
     };
+    const transferNonce = genNonce();
     const updated: SigilMetadata = {
       ...m,
       ["@context"]: m["@context"] ?? SIGIL_CTX,
       type: m.type ?? SIGIL_TYPE,
       canonicalHash: m.canonicalHash || undefined,
-      transferNonce: m.transferNonce || genNonce(),
+      transferNonce,
       transfers: [...(m.transfers ?? []), transfer],
       segmentSize: m.segmentSize ?? SEGMENT_SIZE,
     };
@@ -1729,8 +1730,7 @@ const VerifierStamperInner: React.FC = () => {
       issuedPulse: nowPulse,
     });
     const baseSvgText = await fetch(svgURL).then((r) => r.text());
-    const cleanedSvgText = stripProofMetadata(baseSvgText);
-    const childSvgText = embedMetadataText(cleanedSvgText, childMeta);
+    const childSvgText = embedMetadataText(baseSvgText, childMeta);
     const childDataUrl = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(childSvgText)))}`;
     const sigilPulse = updated.pulse ?? 0;
     download(childDataUrl, `${pulseFilename("sigil_send", sigilPulse, nowPulse)}.svg`);
