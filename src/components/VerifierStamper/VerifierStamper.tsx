@@ -2029,13 +2029,15 @@ const VerifierStamperInner: React.FC = () => {
   const chakraDayDisplay = useMemo<ChakraDay | null>(() => resolveChakraDay(meta ?? {}), [meta]);
 
   const childDeadline = useMemo(() => {
-    if (canonicalContext !== "derivative") return null;
+    const last = meta?.transfers?.slice(-1)[0];
+    const hasOpenTransfer = !!last && !last.receiverSignature;
+    if (!hasOpenTransfer) return null;
     const info = getChildLockInfo(meta, pulseNow);
     if (!info.expireAt) return null;
     const leftPulses = Math.max(0, info.expireAt - pulseNow);
     const leftSteps = Math.ceil(leftPulses / PULSES_PER_STEP);
     return { leftPulses, leftSteps, expireAt: info.expireAt };
-  }, [meta, pulseNow, canonicalContext]);
+  }, [meta, pulseNow]);
 
   const { used: childUsed, expired: childExpired } = useMemo(() => getChildLockInfo(meta, pulseNow), [meta, pulseNow]);
   const parentOpenExp = useMemo(() => getParentOpenExpiry(meta, pulseNow).expired, [meta, pulseNow]);
@@ -2327,11 +2329,9 @@ const VerifierStamperInner: React.FC = () => {
                     )}
                     <KV k="Now" v={pulseNow} />
                     {childDeadline && <KV k="Inhale Seal:" v={`${childDeadline.leftSteps} steps (${childDeadline.leftPulses} pulses) left`} />}
-                    {canonicalContext === "derivative" &&
-                      (() => {
-                        const { expireAt } = getChildLockInfo(meta, pulseNow);
-                        return typeof expireAt === "number" && Number.isFinite(expireAt) ? <KV k="Inhale by:" v={expireAt} /> : null;
-                      })()}
+                    {childDeadline && typeof childDeadline.expireAt === "number" && Number.isFinite(childDeadline.expireAt) ? (
+                      <KV k="Inhale by:" v={childDeadline.expireAt} />
+                    ) : null}
 
                     {meta.userPhiKey && (
                       <KV
