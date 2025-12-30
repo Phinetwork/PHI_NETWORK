@@ -1046,9 +1046,21 @@
 
       const fields = {};
       const take = (k, re) => { const v=re.exec(currentSvgText); if (v) fields[k]=isNaN(+v[1])?v[1]:+v[1]; };
-      take("pulse", /"pulse"\s*:\s*(\d+)/); take("kaiPulse", /"kaiPulse"\s*:\s*(\d+)/);
-      take("beat", /"beat"\s*:\s*(\d+)/); take("stepIndex", /"step(?:Index|index)"\s*:\s*(\d+)/);
-      take("chakraDay", /"chakraDay"\s*:\s*"([^"]+)"/); take("intention", /"intention"\s*:\s*"([^"]*)"/);
+      take("pulse", /"pulse"\s*:\s*(\d+)/);
+      take("pulse", /"pulseExact"\s*:\s*"(\d+)"/);
+      take("pulse", /data-pulse="(\d+)"/i);
+      take("kaiPulse", /"kaiPulse"\s*:\s*(\d+)/);
+      take("beat", /"beat"\s*:\s*(\d+)/);
+      take("beat", /"beatIndex"\s*:\s*(\d+)/);
+      take("beat", /data-beat="(\d+)"/i);
+      take("stepIndex", /"step(?:Index|index)"\s*:\s*(\d+)/);
+      take("stepIndex", /data-step-index="(\d+)"/i);
+      take("stepsPerBeat", /"stepsPerBeat"\s*:\s*(\d+)/);
+      take("stepsPerBeat", /data-steps-per-beat="(\d+)"/i);
+      take("chakraDay", /"chakraDay"\s*:\s*"([^"]+)"/);
+      take("chakraDay", /"chakra"\s*:\s*"([^"]+)"/);
+      take("chakraDay", /data-chakra-day="([^"]+)"/i);
+      take("intention", /"intention"\s*:\s*"([^"]*)"/);
 
       // ZK info (optional)
       const zkScheme = /data-zk-scheme="([^"]+)"/i.exec(currentSvgText)?.[1] || /"zkScheme"\s*:\s*"([^"]+)"/.exec(currentSvgText)?.[1] || null;
@@ -1126,18 +1138,18 @@ $("pv-pdf")?.addEventListener("change", (e) => {
       const pickNum = (re) => { const m = re.exec(txt); return m ? +m[1] : undefined; };
       const pickStr = (re) => { const m = re.exec(txt); return m ? String(m[1]) : undefined; };
       const meta = {};
-      meta.kaiPulse      = pickNum(/"kaiPulse"\s*:\s*(\d+)/) ?? pickNum(/"pulse"\s*:\s*(\d+)/);
+      meta.kaiPulse      = pickNum(/"kaiPulse"\s*:\s*(\d+)/) ?? pickNum(/"pulse"\s*:\s*(\d+)/) ?? pickNum(/"pulseExact"\s*:\s*"(\d+)"/) ?? pickNum(/data-pulse="(\d+)"/i);
       meta.kaiSignature  = pickStr(/"kaiSignature"\s*:\s*"([0-9a-fA-F]{16,})"/) || pickStr(/data-kai-signature="([0-9a-fA-F]{16,})"/i);
       meta.userPhiKey    = pickStr(/"userPhiKey"\s*:\s*"([^"]{10,})"/) || pickStr(/data-phi-key="([^"]{10,})"/i);
-      meta.beat          = pickNum(/"beat"\s*:\s*(\d+)/);
-      meta.stepIndex     = pickNum(/"step(?:Index|index)"\s*:\s*(\d+)/);
-      meta.stepsPerBeat  = pickNum(/"stepsPerBeat"\s*:\s*(\d+)/);
+      meta.beat          = pickNum(/"beat"\s*:\s*(\d+)/) ?? pickNum(/"beatIndex"\s*:\s*(\d+)/) ?? pickNum(/data-beat="(\d+)"/i);
+      meta.stepIndex     = pickNum(/"step(?:Index|index)"\s*:\s*(\d+)/) ?? pickNum(/data-step-index="(\d+)"/i);
+      meta.stepsPerBeat  = pickNum(/"stepsPerBeat"\s*:\s*(\d+)/) ?? pickNum(/data-steps-per-beat="(\d+)"/i);
       meta.seriesSize    = pickNum(/"seriesSize"\s*:\s*(\d+)/) ?? 1;
       meta.quality       = pickStr(/"quality"\s*:\s*"(low|med|high)"/) ?? "med";
       meta.creatorVerified = /"creatorVerified"\s*:\s*true/.test(txt);
       meta.creatorRep    = pickNum(/"creatorRep"\s*:\s*(0?\.\d+|1(?:\.0+)?)/) ?? 0;
       meta.frequencyHz   = pickNum(/"frequency(?:Hz|_hz|_HZ)"\s*:\s*([0-9]*\.?[0-9]+)/);
-      meta.chakraDay     = pickStr(/"chakraDay"\s*:\s*"([^"]+)"/);
+      meta.chakraDay     = pickStr(/"chakraDay"\s*:\s*"([^"]+)"/) ?? pickStr(/"chakra"\s*:\s*"([^"]+)"/) ?? pickStr(/data-chakra-day="([^"]+)"/i);
       meta.chakraGate    = pickStr(/"chakraGate"\s*:\s*"([^"]+)"/);
 
       const txBlocks = txt.match(/"transfers"\s*:\s*\[([\s\S]*?)\]/);
