@@ -216,6 +216,30 @@ html.verify-shell, body.verify-shell{
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+.vseal-value{
+  display: grid;
+  gap: 2px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
+  box-shadow: 0 10px 22px rgba(0,0,0,0.18), 0 0 0 1px rgba(255,255,255,0.05) inset;
+  min-width: 150px;
+}
+.vseal-value-label{
+  font-weight: 1000;
+  letter-spacing: 0.24em;
+  font-size: 0.62rem;
+  color: var(--inkFaint);
+}
+.vseal-value-phi{
+  font-weight: 1000;
+  font-size: 0.84rem;
+}
+.vseal-value-usd{
+  font-size: 0.74rem;
+  color: var(--inkDim);
+}
 .seal{
   display: inline-flex;
   align-items: center;
@@ -555,6 +579,8 @@ html.verify-shell, body.verify-shell{
 .vmini-grid--2{ grid-template-columns: 1fr 1fr; }
 .vmini-grid--3{ grid-template-columns: 1fr 1fr 1fr; }
 .vmini-grid--6{ grid-template-columns: 1fr 1fr 1fr; }
+
+.vvaluation-dashboard{ margin-top: 12px; }
 
 @media (max-width: 520px){
   .vmini-grid--3, .vmini-grid--6{ grid-template-columns: 1fr; }

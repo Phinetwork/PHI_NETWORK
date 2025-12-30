@@ -6,6 +6,8 @@ import "./VerifyPage.css";
 
 import VerifierFrame from "../components/KaiVoh/VerifierFrame";
 import { parseSlug, verifySigilSvg, type VerifyResult } from "../utils/verifySigil";
+import { DEFAULT_ISSUANCE_POLICY, quotePhiForUsd } from "../utils/phi-issuance";
+import { currency as fmtPhi, usd as fmtUsd } from "../components/valuation/display";
 import {
   buildVerifierSlug,
   buildVerifierUrl,
@@ -24,6 +26,10 @@ import { isKASAuthorSig, type KASAuthorSig } from "../utils/authorSig";
 import { verifyBundleAuthorSig } from "../utils/webauthnKAS";
 import { buildKasChallenge, isReceiveSig, verifyWebAuthnAssertion, type ReceiveSig } from "../utils/webauthnReceive";
 import { base64UrlDecode } from "../utils/sha256";
+import { getKaiPulseEternalInt } from "../SovereignSolar";
+import { useKaiTicker } from "../hooks/useKaiTicker";
+import { useValuation } from "./SigilPage/useValuation";
+import type { SigilMetadataLite } from "../utils/valuation";
 
 /* ────────────────────────────────────────────────────────────────
    Utilities
@@ -214,6 +220,16 @@ function MiniField(props: { label: string; value: string; title?: string }): Rea
   );
 }
 
+function LiveValuePill(props: { phiValue: number; usdValue: number | null }): ReactElement {
+  return (
+    <div className="vseal-value" aria-label="Live glyph valuation">
+      <div className="vseal-value-label">LIVE</div>
+      <div className="vseal-value-phi">{fmtPhi(props.phiValue)}</div>
+      <div className="vseal-value-usd">{props.usdValue == null ? "—" : fmtUsd(props.usdValue)}</div>
+    </div>
+  );
+}
+
 function Modal(props: { open: boolean; title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }): ReactElement | null {
   if (!props.open) return null;
   return (
@@ -267,6 +283,63 @@ export default function VerifyPage(): ReactElement {
   const [receiveSig, setReceiveSig] = useState<ReceiveSig | null>(null);
 
   const [dragActive, setDragActive] = useState<boolean>(false);
+
+  const { pulse: currentPulse } = useKaiTicker();
+  const searchParams = useMemo(() => new URLSearchParams(typeof window !== "undefined" ? window.location.search : ""), []);
+
+  const valuationPayload = useMemo<SigilMetadataLite | null>(() => {
+    if (result.status !== "ok") return null;
+    const embedded = result.embedded;
+    const pulseValue = embedded.pulse ?? slug.pulse ?? undefined;
+    return {
+      pulse: pulseValue,
+      kaiPulse: pulseValue,
+      beat: embedded.beat,
+      stepIndex: embedded.stepIndex,
+      frequencyHz: embedded.frequencyHz,
+      chakraDay: embedded.chakraDay,
+      chakraGate: embedded.chakraGate,
+      kaiSignature: embedded.kaiSignature,
+      userPhiKey: embedded.phiKey,
+    };
+  }, [result, slug.pulse]);
+
+  const { valSeal, livePrice } = useValuation({
+    payload: valuationPayload,
+    urlSearchParams: searchParams,
+    currentPulse,
+  });
+
+  const { usdPerPhi } = useMemo(() => {
+    if (!valuationPayload) return { usdPerPhi: 0 };
+    try {
+      const nowKai = currentPulse ?? getKaiPulseEternalInt(new Date());
+      const q = quotePhiForUsd(
+        {
+          meta: valuationPayload,
+          nowPulse: nowKai,
+          usd: 100,
+          currentStreakDays: 0,
+          lifetimeUsdSoFar: 0,
+        },
+        DEFAULT_ISSUANCE_POLICY,
+      );
+      return { usdPerPhi: q.usdPerPhi ?? 0 };
+    } catch {
+      return { usdPerPhi: 0 };
+    }
+  }, [valuationPayload, currentPulse]);
+
+  const liveValuePhi = useMemo(() => {
+    if (!valuationPayload) return null;
+    const candidate = livePrice ?? valSeal?.valuePhi ?? null;
+    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+  }, [valuationPayload, livePrice, valSeal]);
+
+  const liveValueUsd = useMemo(() => {
+    if (liveValuePhi == null || !Number.isFinite(usdPerPhi) || usdPerPhi <= 0) return null;
+    return liveValuePhi * usdPerPhi;
+  }, [liveValuePhi, usdPerPhi]);
 
   // Focus Views
   const [openSvgEditor, setOpenSvgEditor] = useState<boolean>(false);
@@ -693,6 +766,7 @@ export default function VerifyPage(): ReactElement {
           <div className="vseals" aria-label="Official seals">
             <SealPill label="KAS" state={sealKAS} detail={embeddedProof?.authorSig ? "Author seal (WebAuthn KAS)" : "No author seal present"} />
             <SealPill label="G16" state={sealZK} detail={zkMeta?.zkPoseidonHash ? "Groth16 + Poseidon rail" : "No ZK rail present"} />
+            {result.status === "ok" && liveValuePhi != null ? <LiveValuePill phiValue={liveValuePhi} usdValue={liveValueUsd} /> : null}
           </div>
 
           <div className="vkpis" aria-label="Primary identifiers">
@@ -898,19 +972,26 @@ export default function VerifyPage(): ReactElement {
                     <IconBtn icon="💠" title="Remember vessel hash" ariaLabel="Remember vessel hash" onClick={() => void remember(capsuleHash, "Vessel hash")} disabled={!capsuleHash} />
                   </div>
 
-                  <div className="vrow">
-                    <span className="vk">bundleHash</span>
-                    <code className="vv mono" title={bundleHash || "—"}>
-                      {bundleHash ? ellipsizeMiddle(bundleHash, 22, 16) : "—"}
-                    </code>
-                    <IconBtn icon="💠" title="Remember bundle hash" ariaLabel="Remember bundle hash" onClick={() => void remember(bundleHash, "Bundle hash")} disabled={!bundleHash} />
-                  </div>
+                <div className="vrow">
+                  <span className="vk">bundleHash</span>
+                  <code className="vv mono" title={bundleHash || "—"}>
+                    {bundleHash ? ellipsizeMiddle(bundleHash, 22, 16) : "—"}
+                  </code>
+                  <IconBtn icon="💠" title="Remember bundle hash" ariaLabel="Remember bundle hash" onClick={() => void remember(bundleHash, "Bundle hash")} disabled={!bundleHash} />
                 </div>
+              </div>
 
-                <div className="vfoot" aria-label="Proof actions">
-                  <div className="vfoot-left">
-                    <div className="vchip" title="Canonical audit payload">
-                      Audit JSON
+              {result.status === "ok" && liveValuePhi != null ? (
+                <div className="vmini-grid vmini-grid--2 vvaluation-dashboard" aria-label="Live valuation">
+                  <MiniField label="Live Φ value" value={fmtPhi(liveValuePhi)} />
+                  <MiniField label="Live USD value" value={liveValueUsd == null ? "—" : fmtUsd(liveValueUsd)} />
+                </div>
+              ) : null}
+
+              <div className="vfoot" aria-label="Proof actions">
+                <div className="vfoot-left">
+                  <div className="vchip" title="Canonical audit payload">
+                    Audit JSON
                     </div>
                   </div>
                   <div className="vfoot-right">
