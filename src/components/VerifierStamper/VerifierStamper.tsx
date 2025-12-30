@@ -418,56 +418,6 @@ const VerifierStamperInner: React.FC = () => {
     }
   }, [receiveBusy, receiveStatus, bundleHash, resolveReceiverPasskey]);
 
-  const buildReceiveLockKeys = useCallback(
-    async (m: SigilMetadata): Promise<string[]> => {
-      const keys = new Set<string>();
-      if (bundleHash) keys.add(`${RECEIVE_LOCK_PREFIX}:bundle:${bundleHash}`);
-
-      const last = m.transfers?.slice(-1)[0];
-      if (last) {
-        const sendLeaf = await hashTransferSenderSide(last);
-        if (sendLeaf) keys.add(`${RECEIVE_LOCK_PREFIX}:leaf:${sendLeaf}`);
-      }
-
-      let effCanonical = canonical;
-      if (!effCanonical) {
-        try {
-          const eff = await computeEffectiveCanonical(m);
-          effCanonical = eff.canonical;
-        } catch (err) {
-          logError("receive.lock.computeCanonical", err);
-        }
-      }
-      if (effCanonical) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
-
-      const nonce = (m as SigilMetadataWithOptionals).transferNonce;
-      if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
-
-      return Array.from(keys);
-    },
-    [bundleHash, canonical, computeEffectiveCanonical]
-  );
-
-  const hasReceiveLock = useCallback(
-    async (m: SigilMetadata): Promise<boolean> => {
-      const keys = await buildReceiveLockKeys(m);
-      return keys.some((key) => window.localStorage.getItem(key));
-    },
-    [buildReceiveLockKeys]
-  );
-
-  const writeReceiveLock = useCallback(
-    async (m: SigilMetadata, nowPulse: number) => {
-      const keys = await buildReceiveLockKeys(m);
-      for (const key of keys) {
-        if (!window.localStorage.getItem(key)) {
-          window.localStorage.setItem(key, JSON.stringify({ pulse: nowPulse }));
-        }
-      }
-    },
-    [buildReceiveLockKeys]
-  );
-
   const [me, setMe] = useState<Keypair | null>(null);
   useEffect(() => {
     (async () => {
@@ -669,6 +619,56 @@ const VerifierStamperInner: React.FC = () => {
       return { canonical: childCanonical, context: "derivative" };
     },
     [isPersistedChild]
+  );
+
+  const buildReceiveLockKeys = useCallback(
+    async (m: SigilMetadata): Promise<string[]> => {
+      const keys = new Set<string>();
+      if (bundleHash) keys.add(`${RECEIVE_LOCK_PREFIX}:bundle:${bundleHash}`);
+
+      const last = m.transfers?.slice(-1)[0];
+      if (last) {
+        const sendLeaf = await hashTransferSenderSide(last);
+        if (sendLeaf) keys.add(`${RECEIVE_LOCK_PREFIX}:leaf:${sendLeaf}`);
+      }
+
+      let effCanonical = canonical;
+      if (!effCanonical) {
+        try {
+          const eff = await computeEffectiveCanonical(m);
+          effCanonical = eff.canonical;
+        } catch (err) {
+          logError("receive.lock.computeCanonical", err);
+        }
+      }
+      if (effCanonical) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
+
+      const nonce = (m as SigilMetadataWithOptionals).transferNonce;
+      if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
+
+      return Array.from(keys);
+    },
+    [bundleHash, canonical, computeEffectiveCanonical]
+  );
+
+  const hasReceiveLock = useCallback(
+    async (m: SigilMetadata): Promise<boolean> => {
+      const keys = await buildReceiveLockKeys(m);
+      return keys.some((key) => window.localStorage.getItem(key));
+    },
+    [buildReceiveLockKeys]
+  );
+
+  const writeReceiveLock = useCallback(
+    async (m: SigilMetadata, nowPulse: number) => {
+      const keys = await buildReceiveLockKeys(m);
+      for (const key of keys) {
+        if (!window.localStorage.getItem(key)) {
+          window.localStorage.setItem(key, JSON.stringify({ pulse: nowPulse }));
+        }
+      }
+    },
+    [buildReceiveLockKeys]
   );
 
   const handleSvg = async (e: React.ChangeEvent<HTMLInputElement>) => {
