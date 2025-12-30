@@ -104,6 +104,8 @@ import { recordSend, getSpentScaledFor, markConfirmedByLeaf } from "../../utils/
 import { recordSigilTransferMovement } from "../../utils/sigilTransferRegistry";
 import { buildBundleUnsigned, buildVerifierSlug, hashBundle, hashProofCapsuleV1, hashSvgText, normalizeChakraDay, PROOF_CANON, PROOF_HASH_ALG } from "../KaiVoh/verifierProof";
 import { isKASAuthorSig } from "../../utils/authorSig";
+import { computeZkPoseidonHash } from "../../utils/kai";
+import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import {
   buildKasChallenge,
   ensureReceiverPasskey,
@@ -684,8 +686,7 @@ const VerifierStamperInner: React.FC = () => {
     const { used: childUsed, expired: childExpired } = getChildLockInfo(m2, kaiPulseNow());
     const { expired: parentOpenExpired } = getParentOpenExpiry(m2, kaiPulseNow());
 
-    setMeta(m2);
-    setRawMeta(JSON.stringify(m2, null, 2));
+    let metaNext = m2;
 
     const nextUi: UiState = deriveState({
       contextOk,
@@ -715,10 +716,39 @@ const VerifierStamperInner: React.FC = () => {
       setProofBundleMeta(proofMetaNext);
       const bundleHashNext = await computeBundleHashFromSvg(rawSvg, m2, proofMetaNext);
       setBundleHash(bundleHashNext);
+      const receiveFromBundle = readReceiveSigFromBundle(proofMetaNext?.raw);
+      if (receiveFromBundle) {
+        metaNext = { ...metaNext, receiveSig: receiveFromBundle };
+      }
+      if (proofMetaNext?.raw && isRecord(proofMetaNext.raw)) {
+        metaNext = { ...metaNext, proofBundleRaw: proofMetaNext.raw };
+      }
+      const poseidonHash = typeof metaNext.zkPoseidonHash === "string" ? metaNext.zkPoseidonHash : undefined;
+      const payloadHashHex = typeof metaNext.payloadHashHex === "string" ? metaNext.payloadHashHex : undefined;
+      if (poseidonHash && !metaNext.zkProof && payloadHashHex) {
+        try {
+          const computed = await computeZkPoseidonHash(payloadHashHex);
+          if (computed.hash === poseidonHash) {
+            const generated = await generateZkProofFromPoseidonHash({
+              poseidonHash,
+              secret: computed.secret,
+              proofHints: typeof metaNext.proofHints === "object" && metaNext.proofHints !== null ? metaNext.proofHints : undefined,
+            });
+            if (generated) {
+              metaNext = { ...metaNext, zkProof: generated.proof, zkPublicInputs: generated.zkPublicInputs, proofHints: generated.proofHints };
+            }
+          }
+        } catch (err) {
+          logError("zk.generateFromPoseidon", err);
+        }
+      }
     } else {
       setProofBundleMeta(null);
       setBundleHash(null);
     }
+
+    setMeta(metaNext);
+    setRawMeta(JSON.stringify(metaNext, null, 2));
 
     // 🔑 Important: clear the input so choosing the same file again fires onChange
     if (e.target) e.target.value = "";
