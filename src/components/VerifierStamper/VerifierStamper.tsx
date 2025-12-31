@@ -57,8 +57,6 @@ import {
 } from "../verifier/utils/decimal";
 import {
   getChildLockInfo,
-  getParentOpenExpiry,
-  PULSES_PER_STEP,
   CLAIM_STEPS,
   CLAIM_PULSES,
 } from "../verifier/utils/childExpiry";
@@ -496,7 +494,7 @@ const VerifierStamperInner: React.FC = () => {
 
   const [canonical, setCanonical] = useState<string | null>(null);
   const [canonicalContext, setCanonicalContext] = useState<"parent" | "derivative" | null>(null);
-  const receiveRemoteCache = useRef<Map<string, boolean>>(new Map());
+  const receiveRemoteCache = useRef<Map<string, { found: boolean; checked: boolean }>>(new Map());
 
   const openVerifier = () => safeShowDialog(dlgRef.current);
 
@@ -680,6 +678,9 @@ const VerifierStamperInner: React.FC = () => {
         if (sendLeaf) keys.add(`${RECEIVE_LOCK_PREFIX}:leaf:${sendLeaf}`);
       }
 
+      const nonce = (m as SigilMetadataWithOptionals).transferNonce ?? null;
+      if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
+
       let effCanonical = canonical;
       if (!effCanonical) {
         try {
@@ -689,10 +690,7 @@ const VerifierStamperInner: React.FC = () => {
           logError("receive.lock.computeCanonical", err);
         }
       }
-      if (effCanonical) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
-
-      const nonce = (m as SigilMetadataWithOptionals).transferNonce ?? null;
-      if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
+      if (effCanonical && !nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
 
       return { keys: Array.from(keys), canonical: effCanonical ?? null, nonce };
     },
@@ -716,7 +714,10 @@ const VerifierStamperInner: React.FC = () => {
         if (readTransferDirectionFromPayload(payload) !== "receive") continue;
         const payloadCanonical = readPayloadCanonical(payload);
         const payloadNonce = readPayloadNonce(payload);
-        if (nonce && payloadNonce && payloadNonce === nonce) return true;
+        if (nonce) {
+          if (payloadNonce && payloadNonce === nonce) return true;
+          continue;
+        }
         if (canonical && payloadCanonical && payloadCanonical === canonical) return true;
       }
 
@@ -725,17 +726,18 @@ const VerifierStamperInner: React.FC = () => {
     [buildReceiveLockKeys]
   );
 
-  const hasRemoteReceiveLock = useCallback(
-    async (m: SigilMetadata): Promise<boolean> => {
-      if (!isOnline()) return false;
+  const checkRemoteReceiveLock = useCallback(
+    async (m: SigilMetadata): Promise<{ found: boolean; checked: boolean }> => {
+      if (!isOnline()) return { found: false, checked: false };
       const { canonical, nonce } = await buildReceiveLockKeys(m);
-      if (!canonical && !nonce) return false;
+      if (!canonical && !nonce) return { found: false, checked: false };
 
       const cacheKey = `${canonical ?? ""}|${nonce ?? ""}`;
       const cached = receiveRemoteCache.current.get(cacheKey);
       if (cached !== undefined) return cached;
 
       let found = false;
+      let checked = false;
       for (let page = 0; page < RECEIVE_REMOTE_PAGES; page += 1) {
         const offset = page * RECEIVE_REMOTE_LIMIT;
         const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
@@ -749,6 +751,7 @@ const VerifierStamperInner: React.FC = () => {
         );
 
         if (!r.ok) break;
+        checked = true;
 
         const urls = r.value.urls;
         if (!Array.isArray(urls) || urls.length === 0) break;
@@ -760,9 +763,12 @@ const VerifierStamperInner: React.FC = () => {
           if (readTransferDirectionFromPayload(payload) !== "receive") continue;
           const payloadCanonical = readPayloadCanonical(payload);
           const payloadNonce = readPayloadNonce(payload);
-          if (nonce && payloadNonce && payloadNonce === nonce) {
-            found = true;
-            break;
+          if (nonce) {
+            if (payloadNonce && payloadNonce === nonce) {
+              found = true;
+              break;
+            }
+            continue;
           }
           if (canonical && payloadCanonical && payloadCanonical === canonical) {
             found = true;
@@ -774,10 +780,21 @@ const VerifierStamperInner: React.FC = () => {
         if (urls.length < RECEIVE_REMOTE_LIMIT) break;
       }
 
-      receiveRemoteCache.current.set(cacheKey, found);
-      return found;
+      const result = { found, checked };
+      if (checked) {
+        receiveRemoteCache.current.set(cacheKey, result);
+      }
+      return result;
     },
     [buildReceiveLockKeys]
+  );
+
+  const hasRemoteReceiveLock = useCallback(
+    async (m: SigilMetadata): Promise<boolean> => {
+      const result = await checkRemoteReceiveLock(m);
+      return result.found;
+    },
+    [checkRemoteReceiveLock]
   );
 
   const hasReceiveLock = useCallback(
@@ -981,8 +998,7 @@ const VerifierStamperInner: React.FC = () => {
       setCanonicalContext(null);
     }
 
-    const { used: childUsed, expired: childExpired } = getChildLockInfo(m2, kaiPulseNow());
-    const { expired: parentOpenExpired } = getParentOpenExpiry(m2, kaiPulseNow());
+    const { used: childUsed } = getChildLockInfo(m2, kaiPulseNow());
 
     let metaNext = m2;
 
@@ -997,8 +1013,8 @@ const VerifierStamperInner: React.FC = () => {
       lastClosed,
       isUnsigned,
       childUsed,
-      childExpired,
-      parentOpenExpired,
+      childExpired: false,
+      parentOpenExpired: false,
       isChildContext: effCtx === "derivative",
     });
     setUiState(nextUi);
@@ -1334,8 +1350,7 @@ const VerifierStamperInner: React.FC = () => {
         setCanonicalContext(null);
       }
 
-      const { used: childUsed, expired: childExpired } = getChildLockInfo(mNew, kaiPulseNow());
-      const { expired: parentOpenExpired } = getParentOpenExpiry(mNew, kaiPulseNow());
+      const { used: childUsed } = getChildLockInfo(mNew, kaiPulseNow());
       const cMatch =
         contentSigExpected && mNew.kaiSignature ? contentSigExpected.toLowerCase() === mNew.kaiSignature.toLowerCase() : null;
 
@@ -1350,8 +1365,8 @@ const VerifierStamperInner: React.FC = () => {
         lastClosed,
         isUnsigned,
         childUsed,
-        childExpired,
-        parentOpenExpired,
+        childExpired: false,
+        parentOpenExpired: false,
         isChildContext: effCtx === "derivative",
       });
       setUiState(next);
@@ -2114,7 +2129,24 @@ const VerifierStamperInner: React.FC = () => {
   const receive = async () => {
     if (!meta || !svgURL || !liveSig) return;
 
-    if (await hasReceiveLock(meta)) {
+    if (!isOnline()) {
+      setError("Online connection required to verify global receive lock.");
+      return;
+    }
+
+    const remoteCheck = await checkRemoteReceiveLock(meta);
+    if (!remoteCheck.checked) {
+      setError("Unable to verify the global receive lock. Please try again.");
+      return;
+    }
+
+    if (remoteCheck.found) {
+      setError("This transfer has already been received.");
+      setReceiveStatus("already");
+      return;
+    }
+
+    if ((await hasLocalReceiveLock(meta)) || (await hasRegistryReceiveLock(meta))) {
       setError("This transfer has already been received.");
       setReceiveStatus("already");
       return;
@@ -2126,22 +2158,9 @@ const VerifierStamperInner: React.FC = () => {
       if (!receiveSigLocal) return;
     }
 
-    if (canonicalContext === "parent") {
-      const { expired: parentExpired } = getParentOpenExpiry(meta, kaiPulseNow());
-      if (parentExpired) {
-        setError("This open send has expired.");
-        return;
-      }
-    }
-
-    const { used, expired } = getChildLockInfo(meta, kaiPulseNow());
+    const { used } = getChildLockInfo(meta, kaiPulseNow());
     if (used) {
       setError("This transfer link has already been used.");
-      return;
-    }
-    if (expired) {
-      setError("This transfer link has expired.");
-      setUiState("complete");
       return;
     }
 
@@ -2431,19 +2450,7 @@ const VerifierStamperInner: React.FC = () => {
   // Chakra: resolve from chakraDay or chakraGate (strips "gate" implicitly)
   const chakraDayDisplay = useMemo<ChakraDay | null>(() => resolveChakraDay(meta ?? {}), [meta]);
 
-  const childDeadline = useMemo(() => {
-    const last = meta?.transfers?.slice(-1)[0];
-    const hasOpenTransfer = !!last && !last.receiverSignature;
-    if (!hasOpenTransfer) return null;
-    const info = getChildLockInfo(meta, pulseNow);
-    if (!info.expireAt) return null;
-    const leftPulses = Math.max(0, info.expireAt - pulseNow);
-    const leftSteps = Math.ceil(leftPulses / PULSES_PER_STEP);
-    return { leftPulses, leftSteps, expireAt: info.expireAt };
-  }, [meta, pulseNow]);
-
-  const { used: childUsed, expired: childExpired } = useMemo(() => getChildLockInfo(meta, pulseNow), [meta, pulseNow]);
-  const parentOpenExp = useMemo(() => getParentOpenExpiry(meta, pulseNow).expired, [meta, pulseNow]);
+  const { used: childUsed } = useMemo(() => getChildLockInfo(meta, pulseNow), [meta, pulseNow]);
 
   const zkSummary = useMemo(() => {
     const hardened = meta?.hardenedTransfers ?? [];
@@ -2548,8 +2555,8 @@ const VerifierStamperInner: React.FC = () => {
                 headProof={headProof}
                 canonicalContext={canonicalContext}
                 childUsed={childUsed}
-                childExpired={childExpired}
-                parentOpenExpired={parentOpenExp}
+                childExpired={false}
+                parentOpenExpired={false}
                 isSendFilename={isSendFilename}
               />
             </div>
@@ -2606,15 +2613,6 @@ const VerifierStamperInner: React.FC = () => {
                     </ValueChip>
                   </div>
 
-                  {isSendFilename && (
-                    <div className="child-banner tooltip-container" style={{ fontSize: 10, opacity: 0.9, marginTop: 6 }}>
-                      <strong>7 Steps from Exhale</strong> <span className="tooltip-trigger">INHALE:</span>
-                      <div className="tooltip">
-                        You have 7 steps (77 pulses) to inhale &amp; seal this Sigil. After this period, INHALE is permanently
-                        finalized &amp; the Sigil is eternally sealed.
-                      </div>
-                    </div>
-                  )}
                 </div>
               </header>
 
@@ -2701,12 +2699,12 @@ const VerifierStamperInner: React.FC = () => {
                           k="Receive claim:"
                           v={
                             receiveStatus === "already" ? (
-                              "Already received"
+                              "Received"
                             ) : receiveStatus === "new" ? (
                               <>
                                 New receive{" "}
-                                <button className="secondary" onClick={() => void claimReceiveSig()} disabled={receiveBusy}>
-                                  {receiveBusy ? "Claiming…" : "Claim & Embed"}
+                                <button className="secondary" onClick={() => void receive()} disabled={receiveBusy}>
+                                  {receiveBusy ? "Claiming…" : "Inhale & Download"}
                                 </button>
                               </>
                             ) : (
@@ -2731,10 +2729,6 @@ const VerifierStamperInner: React.FC = () => {
                       />
                     )}
                     <KV k="Now" v={pulseNow} />
-                    {childDeadline && <KV k="Inhale Seal:" v={`${childDeadline.leftSteps} steps (${childDeadline.leftPulses} pulses) left`} />}
-                    {childDeadline && typeof childDeadline.expireAt === "number" && Number.isFinite(childDeadline.expireAt) ? (
-                      <KV k="Inhale by:" v={childDeadline.expireAt} />
-                    ) : null}
 
                     {meta.userPhiKey && (
                       <KV
@@ -2779,12 +2773,6 @@ const VerifierStamperInner: React.FC = () => {
                     {headProof !== null && <KV k="Head proof root:" v={headProof.root} wide mono />}
                     <KV k="Head proof root (v14):" v={(meta as SigilMetadataWithOptionals)?.transfersWindowRootV14 ?? "—"} wide mono />
                     {zkSummary && <KV k="ZK proofs:" v={zkSummary.label} />}
-
-                    {canonicalContext === "parent" &&
-                      (() => {
-                        const pe = getParentOpenExpiry(meta, pulseNow);
-                        return pe.expireAt ? <KV k="Inhale expires @:" v={pe.expireAt} /> : null;
-                      })()}
 
                     {canonicalContext === "derivative" && (meta as SigilMetadataWithOptionals)?.sendLock?.used && <KV k="One-time lock:" v="Used" />}
                     <KV k="Hardened transfers:" v={meta.hardenedTransfers?.length ?? 0} />
@@ -3081,17 +3069,9 @@ const VerifierStamperInner: React.FC = () => {
                       onClick={receive}
                       aria="Inhale (receive)"
                       titleText={
-                        canonicalContext === "derivative"
-                          ? childExpired
-                            ? "Link expired"
-                            : childUsed
-                              ? "Link already used"
-                              : "Inhale"
-                          : parentOpenExp
-                            ? "Send expired"
-                            : "Inhale"
+                        canonicalContext === "derivative" && childUsed ? "Link already used" : "Inhale"
                       }
-                      disabled={(canonicalContext === "derivative" && (childExpired || childUsed)) || (canonicalContext === "parent" && parentOpenExp)}
+                      disabled={canonicalContext === "derivative" && childUsed}
                       path="M2 22l11-11M2 22l20-7-9-4-4-9-7 20z"
                     />
                   )}
