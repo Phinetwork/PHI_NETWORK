@@ -193,23 +193,48 @@ function readTransferDirection(value: unknown): "send" | "receive" | null {
 
 function readTransferDirectionFromPayload(payload: SigilSharePayloadLoose): "send" | "receive" | null {
   const record = payload as Record<string, unknown>;
-  return (
-    readTransferDirection(record.transferDirection) ||
-    readTransferDirection(record.transferMode) ||
-    readTransferDirection(record.transferKind) ||
-    readTransferDirection(record.phiDirection)
-  );
+  const readFrom = (src: Record<string, unknown> | null) =>
+    src
+      ? readTransferDirection(src.transferDirection) ||
+        readTransferDirection(src.transferMode) ||
+        readTransferDirection(src.transferKind) ||
+        readTransferDirection(src.phiDirection) ||
+        readTransferDirection(src.breathDirection) ||
+        readTransferDirection(src.breathMode) ||
+        readTransferDirection(src.breathKind) ||
+        readTransferDirection(src.breath) ||
+        readTransferDirection(src.direction) ||
+        readTransferDirection(src.action) ||
+        readTransferDirection(src.transferAction) ||
+        readTransferDirection(src.transferFlow) ||
+        readTransferDirection(src.flow)
+      : null;
+  const feed = isRecord(record.feed) ? (record.feed as Record<string, unknown>) : null;
+  return readFrom(record) || readFrom(feed);
 }
 
 function readPayloadCanonical(payload: SigilSharePayloadLoose): string | null {
   const record = payload as Record<string, unknown>;
-  const raw = record.canonicalHash ?? record.childHash ?? record.hash;
+  const raw =
+    record.canonicalHash ??
+    record.canonical ??
+    record.canonical_hash ??
+    record.childHash ??
+    record.hash ??
+    record.sigilHash ??
+    record.sigil_hash;
   return typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : null;
 }
 
 function readPayloadNonce(payload: SigilSharePayloadLoose): string | null {
   const record = payload as Record<string, unknown>;
-  const raw = record.transferNonce ?? record.nonce;
+  const raw =
+    record.transferNonce ??
+    record.nonce ??
+    record.transferToken ??
+    record.token ??
+    record.receiveNonce ??
+    record.inhaleNonce;
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
