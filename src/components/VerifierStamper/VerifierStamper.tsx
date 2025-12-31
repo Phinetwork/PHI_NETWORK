@@ -724,7 +724,10 @@ const VerifierStamperInner: React.FC = () => {
         if (sendLeaf) keys.add(`${RECEIVE_LOCK_PREFIX}:leaf:${sendLeaf}`);
       }
 
-      const nonce = (m as SigilMetadataWithOptionals).transferNonce ?? null;
+      const nonce =
+        (m as SigilMetadataWithOptionals).transferNonce ??
+        (m as SigilMetadataWithOptionals).sendLock?.nonce ??
+        null;
       if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
 
       let effCanonical = canonical;
@@ -736,7 +739,7 @@ const VerifierStamperInner: React.FC = () => {
           logError("receive.lock.computeCanonical", err);
         }
       }
-      if (effCanonical && !nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
+      if (effCanonical) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
 
       return { keys: Array.from(keys), canonical: effCanonical ?? null, nonce };
     },
@@ -760,10 +763,7 @@ const VerifierStamperInner: React.FC = () => {
         if (!isReceiveLockPayload(payload)) continue;
         const payloadCanonical = readPayloadCanonical(payload);
         const payloadNonce = readPayloadNonce(payload);
-        if (nonce) {
-          if (payloadNonce && payloadNonce === nonce) return true;
-          continue;
-        }
+        if (nonce && payloadNonce && payloadNonce === nonce) return true;
         if (canonical && payloadCanonical && payloadCanonical === canonical) return true;
       }
 
@@ -828,12 +828,9 @@ const VerifierStamperInner: React.FC = () => {
           if (!isReceiveLockPayload(payload)) continue;
           const payloadCanonical = readPayloadCanonical(payload);
           const payloadNonce = readPayloadNonce(payload);
-          if (nonce) {
-            if (payloadNonce && payloadNonce === nonce) {
-              found = true;
-              break;
-            }
-            continue;
+          if (nonce && payloadNonce && payloadNonce === nonce) {
+            found = true;
+            break;
           }
           if (canonical && payloadCanonical && payloadCanonical === canonical) {
             found = true;
