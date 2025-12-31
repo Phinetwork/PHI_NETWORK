@@ -807,7 +807,7 @@ function SigilTreeNode({
             </span>
           )}
           {inhaleLabel === "inhale" && (
-            <span className="phi-pill phi-pill--lift" title="Inhale">
+            <span className="phi-status phi-status--inhale" title="Inhale">
               Inhale
             </span>
           )}
