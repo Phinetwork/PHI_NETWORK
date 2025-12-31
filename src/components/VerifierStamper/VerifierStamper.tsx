@@ -106,7 +106,7 @@ import { computeZkPoseidonHash } from "../../utils/kai";
 import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import type { SigilProofHints } from "../../types/sigil";
 import type { SigilSharePayloadLoose } from "../SigilExplorer/types";
-import { apiFetchJsonWithFailover, API_URLS_PATH } from "../SigilExplorer/apiClient";
+import { apiFetchWithFailover, API_URLS_PATH, loadApiBackupDeadUntil, loadApiBaseHint } from "../SigilExplorer/apiClient";
 import { extractPayloadFromUrl } from "../SigilExplorer/url";
 import { enqueueInhaleKrystal, flushInhaleQueue } from "../SigilExplorer/inhaleQueue";
 import { memoryRegistry, isOnline } from "../SigilExplorer/registryStore";
@@ -193,24 +193,82 @@ function readTransferDirection(value: unknown): "send" | "receive" | null {
 
 function readTransferDirectionFromPayload(payload: SigilSharePayloadLoose): "send" | "receive" | null {
   const record = payload as Record<string, unknown>;
-  return (
-    readTransferDirection(record.transferDirection) ||
-    readTransferDirection(record.transferMode) ||
-    readTransferDirection(record.transferKind) ||
-    readTransferDirection(record.phiDirection)
-  );
+  const readFrom = (src: Record<string, unknown> | null) =>
+    src
+      ? readTransferDirection(src.transferDirection) ||
+        readTransferDirection(src.transferMode) ||
+        readTransferDirection(src.transferKind) ||
+        readTransferDirection(src.phiDirection) ||
+        readTransferDirection(src.breathDirection) ||
+        readTransferDirection(src.breathMode) ||
+        readTransferDirection(src.breathKind) ||
+        readTransferDirection(src.breath) ||
+        readTransferDirection(src.direction) ||
+        readTransferDirection(src.action) ||
+        readTransferDirection(src.transferAction) ||
+        readTransferDirection(src.transferFlow) ||
+        readTransferDirection(src.flow)
+      : null;
+  const feed = isRecord(record.feed) ? (record.feed as Record<string, unknown>) : null;
+  return readFrom(record) || readFrom(feed);
 }
 
 function readPayloadCanonical(payload: SigilSharePayloadLoose): string | null {
   const record = payload as Record<string, unknown>;
-  const raw = record.canonicalHash ?? record.childHash ?? record.hash;
+  const raw =
+    record.canonicalHash ??
+    record.canonical ??
+    record.canonical_hash ??
+    record.childHash ??
+    record.hash ??
+    record.sigilHash ??
+    record.sigil_hash;
   return typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : null;
 }
 
 function readPayloadNonce(payload: SigilSharePayloadLoose): string | null {
   const record = payload as Record<string, unknown>;
-  const raw = record.transferNonce ?? record.nonce;
+  const raw =
+    record.transferNonce ??
+    record.nonce ??
+    record.transferToken ??
+    record.token ??
+    record.receiveNonce ??
+    record.inhaleNonce;
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function resolveOriginUrlFromRegistry(parentCanonical: string, fallbackUrl: string): string {
+  if (!parentCanonical) return fallbackUrl;
+  for (const payload of memoryRegistry.values()) {
+    const payloadCanonical = readPayloadCanonical(payload);
+    if (!payloadCanonical || payloadCanonical !== parentCanonical) continue;
+    const record = payload as Record<string, unknown>;
+    const originUrl = typeof record.originUrl === "string" ? record.originUrl.trim() : "";
+    if (originUrl) return originUrl;
+    const parentUrl = typeof record.parentUrl === "string" ? record.parentUrl.trim() : "";
+    if (!parentUrl) continue;
+    const parentPayload = extractPayloadFromUrl(parentUrl);
+    const parentOrigin = parentPayload && typeof parentPayload.originUrl === "string" ? parentPayload.originUrl.trim() : "";
+    if (parentOrigin) return parentOrigin;
+  }
+  return fallbackUrl;
+}
+
+function hasReceiveProofFields(payload: SigilSharePayloadLoose): boolean {
+  const record = payload as Record<string, unknown>;
+  const readFlag = (src: Record<string, unknown> | null) => {
+    if (!src) return false;
+    if (typeof src.receiverSignature === "string" && src.receiverSignature.trim()) return true;
+    if (typeof src.receiverStamp === "string" && src.receiverStamp.trim()) return true;
+    return typeof src.receiverKaiPulse === "number" && Number.isFinite(src.receiverKaiPulse);
+  };
+  const feed = isRecord(record.feed) ? (record.feed as Record<string, unknown>) : null;
+  return readFlag(record) || readFlag(feed);
+}
+
+function isReceiveLockPayload(payload: SigilSharePayloadLoose): boolean {
+  return readTransferDirectionFromPayload(payload) === "receive" || hasReceiveProofFields(payload);
 }
 
 function collectReceiveSigHistory(raw: Record<string, unknown>, nextSig?: ReceiveSig | null): ReceiveSig[] {
@@ -278,6 +336,11 @@ const VerifierStamperInner: React.FC = () => {
   useEffect(() => {
     const id = window.setInterval(() => setPulseNow(kaiPulseNow()), 1000);
     return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    loadApiBackupDeadUntil();
+    loadApiBaseHint();
   }, []);
 
   const [svgURL, setSvgURL] = useState<string | null>(null);
@@ -678,7 +741,10 @@ const VerifierStamperInner: React.FC = () => {
         if (sendLeaf) keys.add(`${RECEIVE_LOCK_PREFIX}:leaf:${sendLeaf}`);
       }
 
-      const nonce = (m as SigilMetadataWithOptionals).transferNonce ?? null;
+      const nonce =
+        (m as SigilMetadataWithOptionals).transferNonce ??
+        (m as SigilMetadataWithOptionals).sendLock?.nonce ??
+        null;
       if (nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:nonce:${nonce}`);
 
       let effCanonical = canonical;
@@ -690,7 +756,7 @@ const VerifierStamperInner: React.FC = () => {
           logError("receive.lock.computeCanonical", err);
         }
       }
-      if (effCanonical && !nonce) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
+      if (effCanonical) keys.add(`${RECEIVE_LOCK_PREFIX}:canonical:${effCanonical}`);
 
       return { keys: Array.from(keys), canonical: effCanonical ?? null, nonce };
     },
@@ -711,13 +777,10 @@ const VerifierStamperInner: React.FC = () => {
       if (!canonical && !nonce) return false;
 
       for (const payload of memoryRegistry.values()) {
-        if (readTransferDirectionFromPayload(payload) !== "receive") continue;
+        if (!isReceiveLockPayload(payload)) continue;
         const payloadCanonical = readPayloadCanonical(payload);
         const payloadNonce = readPayloadNonce(payload);
-        if (nonce) {
-          if (payloadNonce && payloadNonce === nonce) return true;
-          continue;
-        }
+        if (nonce && payloadNonce && payloadNonce === nonce) return true;
         if (canonical && payloadCanonical && payloadCanonical === canonical) return true;
       }
 
@@ -742,7 +805,7 @@ const VerifierStamperInner: React.FC = () => {
       let failed = false;
       for (let page = 0; page < RECEIVE_REMOTE_PAGES; page += 1) {
         const offset = page * RECEIVE_REMOTE_LIMIT;
-        const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
+        const res = await apiFetchWithFailover(
           (base) => {
             const url = new URL(API_URLS_PATH, base);
             url.searchParams.set("offset", String(offset));
@@ -752,28 +815,39 @@ const VerifierStamperInner: React.FC = () => {
           { method: "GET", cache: "no-store" }
         );
 
-        if (!r.ok) {
+        if (!res) {
+          failed = true;
+          break;
+        }
+
+        if (!res.ok && res.status !== 304) {
           failed = true;
           break;
         }
         hadSuccess = true;
 
-        const urls = r.value.urls;
+        let urls: unknown = [];
+        if (res.status !== 304) {
+          try {
+            const responsePayload = (await res.json()) as Partial<ApiUrlsPageResponse> | null;
+            urls = responsePayload?.urls ?? [];
+          } catch {
+            urls = [];
+          }
+        }
+
         if (!Array.isArray(urls) || urls.length === 0) break;
 
         for (const rawUrl of urls) {
           if (typeof rawUrl !== "string") continue;
           const payload = extractPayloadFromUrl(rawUrl);
           if (!payload) continue;
-          if (readTransferDirectionFromPayload(payload) !== "receive") continue;
+          if (!isReceiveLockPayload(payload)) continue;
           const payloadCanonical = readPayloadCanonical(payload);
           const payloadNonce = readPayloadNonce(payload);
-          if (nonce) {
-            if (payloadNonce && payloadNonce === nonce) {
-              found = true;
-              break;
-            }
-            continue;
+          if (nonce && payloadNonce && payloadNonce === nonce) {
+            found = true;
+            break;
           }
           if (canonical && payloadCanonical && payloadCanonical === canonical) {
             found = true;
@@ -857,6 +931,10 @@ const VerifierStamperInner: React.FC = () => {
       try {
         const { makeSigilUrl } = await import("../../utils/sigilUrl");
         parentUrl = makeSigilUrl(parentCanonical, sharePayload);
+        const parentToken = (m as SigilMetadataWithOptionals).transferNonce || "";
+        if (parentToken) {
+          parentUrl = rewriteUrlPayload(parentUrl, sharePayload, parentToken);
+        }
       } catch (err) {
         logError("receive.lock.parentUrl", err);
         const u = new URL(typeof window !== "undefined" ? window.location.href : "http://localhost");
@@ -864,10 +942,13 @@ const VerifierStamperInner: React.FC = () => {
         parentUrl = u.toString();
       }
 
+      const originUrl = resolveOriginUrlFromRegistry(parentCanonical, parentUrl);
+
       const lastTransfer = m.transfers?.slice(-1)[0];
       const enriched = {
         ...sharePayload,
         parentUrl,
+        originUrl,
         canonicalHash,
         parentHash: parentCanonical,
         transferNonce: token,
@@ -1209,9 +1290,18 @@ const VerifierStamperInner: React.FC = () => {
   }
 
   const shareTransferLink = useCallback(async (m: SigilMetadata, transferAmountPhi?: string) => {
-    const parentCanonical =
-      (m.canonicalHash as string | undefined)?.toLowerCase() ||
-      (await sha256Hex(`${m.pulse}|${m.beat}|${m.stepIndex}|${m.chakraDay}`)).toLowerCase();
+    let parentCanonical = (m.canonicalHash as string | undefined)?.toLowerCase() ?? "";
+    if (!parentCanonical) {
+      try {
+        const eff = await computeEffectiveCanonical(m);
+        parentCanonical = eff.canonical;
+      } catch (err) {
+        logError("shareTransferLink.computeCanonical", err);
+      }
+    }
+    if (!parentCanonical) {
+      parentCanonical = (await sha256Hex(`${m.pulse}|${m.beat}|${m.stepIndex}|${m.chakraDay}`)).toLowerCase();
+    }
 
     const last = (m.transfers ?? []).slice(-1)[0];
     const hardenedLast = (m.hardenedTransfers ?? []).slice(-1)[0];
@@ -1264,6 +1354,10 @@ const VerifierStamperInner: React.FC = () => {
     try {
       const { makeSigilUrl } = await import("../../utils/sigilUrl");
       parentUrl = makeSigilUrl(parentCanonical, sharePayload);
+      const parentToken = m.transferNonce || "";
+      if (parentToken) {
+        parentUrl = rewriteUrlPayload(parentUrl, sharePayload, parentToken);
+      }
     } catch (err) {
       logError("shareTransferLink.parentUrl", err);
       const u = new URL(typeof window !== "undefined" ? window.location.href : "http://localhost");
@@ -1271,17 +1365,20 @@ const VerifierStamperInner: React.FC = () => {
       parentUrl = u.toString();
     }
 
+    const originUrl = resolveOriginUrlFromRegistry(parentCanonical, parentUrl);
+
     const enriched = {
       ...sharePayload,
       parentUrl,
+      originUrl,
       canonicalHash: childHash,
       parentHash: parentCanonical,
       transferNonce: token,
       claim,
       preview,
+      transferDirection: "send",
       ...(transferAmountPhi
         ? {
-            transferDirection: "send",
             transferAmountPhi,
             phiDelta: `-${transferAmountPhi}`,
           }
