@@ -21,6 +21,7 @@ import {
   type ApiSealResponse,
 } from "../components/SigilExplorer/apiClient";
 import { canonicalizeUrl } from "../components/SigilExplorer/url";
+import { SIGIL_EXPLORER_OPEN_EVENT } from "../constants/sigilExplorer";
 import { subscribeSigilRegistry } from "./sigilRegistry";
 
 type SyncReason = "open" | "pulse" | "visible" | "focus" | "online" | "event";
@@ -77,10 +78,22 @@ function getLatestPulseFromRegistry(): number | undefined {
   return latest;
 }
 
+function getRegistryCount(): number {
+  let count = 0;
+  for (const [,] of memoryRegistry) count += 1;
+  return count;
+}
+
 function readRemotePulse(body: ApiSealResponse): number | undefined {
   const pulse = body?.pulse ?? body?.latestPulse ?? body?.latest_pulse;
   if (typeof pulse !== "number" || !Number.isFinite(pulse)) return undefined;
   return pulse;
+}
+
+function readRemoteTotal(body: ApiSealResponse): number | undefined {
+  const total = body?.total;
+  if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
+  return total;
 }
 
 export function startSigilExplorerSync(): () => void {
@@ -144,6 +157,13 @@ export function startSigilExplorerSync(): () => void {
   };
   window.addEventListener("sigil:sent", onSentEvent as EventListener);
 
+  const onExplorerOpen = (): void => {
+    resnapBreath();
+    void inhaleOnce();
+    void exhaleOnce("open");
+  };
+  window.addEventListener(SIGIL_EXPLORER_OPEN_EVENT, onExplorerOpen as EventListener);
+
   const ac = new AbortController();
 
   const inhaleOnce = async (): Promise<void> => {
@@ -185,7 +205,12 @@ export function startSigilExplorerSync(): () => void {
       const hasNewerPulse =
         remotePulse != null && (localLatestPulse == null || remotePulse > localLatestPulse);
 
-      if (prevSeal && nextSeal && prevSeal === nextSeal && !hasNewerPulse) {
+      const remoteTotal = readRemoteTotal(body);
+      const localCount = remoteTotal != null ? getRegistryCount() : undefined;
+      const hasNewerTotal =
+        remoteTotal != null && (localCount == null || remoteTotal > localCount);
+
+      if (prevSeal && nextSeal && prevSeal === nextSeal && !hasNewerPulse && !hasNewerTotal) {
         remoteSeal = nextSeal;
         return;
       }
@@ -265,6 +290,7 @@ export function startSigilExplorerSync(): () => void {
 
     if (bag.registerSend === onSendRecord) bag.registerSend = prevSend;
     window.removeEventListener("sigil:sent", onSentEvent as EventListener);
+    window.removeEventListener(SIGIL_EXPLORER_OPEN_EVENT, onExplorerOpen as EventListener);
     window.removeEventListener("focus", onFocus);
     window.removeEventListener("online", onOnline);
     window.removeEventListener("pagehide", onPageHide);
