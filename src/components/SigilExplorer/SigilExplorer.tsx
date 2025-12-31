@@ -319,6 +319,7 @@ type NodeValueSnapshot = {
   usdValue: number | null;
   usdPerPhi: number | null;
   transferMove: TransferMove | null;
+  receivedAmount: number;
 };
 
 function resolveTransferMoveForNode(
@@ -805,24 +806,18 @@ function OriginPanel({
   const rootSnapshot = valueSnapshots.get(root.id) ?? null;
 
   const branchValue = useMemo(() => {
-    let liftPhi = 0;
     let derivedPhi = 0;
-    const walk = (node: SigilNode) => {
-      if (node.id !== root.id) {
-        const snap = valueSnapshots.get(node.id);
-        if (snap?.basePhi != null) liftPhi += snap.basePhi;
-        if (snap?.transferMove?.direction === "send") derivedPhi += snap.transferMove.amount;
-      }
-      node.children.forEach(walk);
-    };
-    walk(root);
+    for (const child of root.children) {
+      const snap = valueSnapshots.get(child.id);
+      if (snap?.receivedAmount) derivedPhi += snap.receivedAmount;
+    }
 
     const basePhi = rootSnapshot?.basePhi ?? null;
-    const netPhi = basePhi != null ? Math.max(0, basePhi + liftPhi - derivedPhi) : null;
+    const netPhi = rootSnapshot?.netPhi ?? null;
     const usdPerPhi = rootSnapshot?.usdPerPhi ?? null;
     const usdValue = netPhi != null && usdPerPhi != null ? netPhi * usdPerPhi : null;
 
-    return { basePhi, netPhi, usdValue, liftPhi, derivedPhi };
+    return { basePhi, netPhi, usdValue, derivedPhi };
   }, [root, rootSnapshot, valueSnapshots]);
 
   const originLiveTitle =
@@ -857,11 +852,6 @@ function OriginPanel({
           {branchValue.usdValue != null && (
             <span className="phi-pill phi-pill--usd" title={originLiveTitle}>
               ${formatUsd(branchValue.usdValue)}
-            </span>
-          )}
-          {branchValue.liftPhi > 0 && (
-            <span className="phi-pill phi-pill--lift" title="Memory lift from derivative glyphs">
-              Lift +{formatPhi(branchValue.liftPhi)}Φ
             </span>
           )}
           {branchValue.derivedPhi > 0 && (
@@ -1689,31 +1679,42 @@ const SigilExplorer: React.FC = () => {
   const valueSnapshots = useMemo(() => {
     const out = new Map<string, NodeValueSnapshot>();
 
-    const walk = (node: SigilNode) => {
+    const walk = (node: SigilNode): number => {
       const basePhi = computeLivePhi(node.payload, nowPulse);
       const usdPerPhi = computeUsdPerPhi(node.payload, nowPulse);
       const transferMove = resolveTransferMoveForNode(node, transferRegistry) ?? null;
-      const delta = transferMove
-        ? transferMove.direction === "receive"
-          ? -transferMove.amount
-          : transferMove.amount
-        : 0;
-      const netPhi = basePhi != null ? Math.max(0, basePhi + delta) : null;
-      const usdValue = netPhi != null && usdPerPhi != null ? netPhi * usdPerPhi : null;
+      const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
+      const receivedAmount = transferStatus === "received" && transferMove ? transferMove.amount : 0;
+      const baseValue = receivedAmount > 0 ? receivedAmount : basePhi ?? 0;
+
+      let childDeductions = 0;
+      for (const child of node.children) {
+        childDeductions += walk(child);
+      }
+
+      const netPhi = Math.max(0, baseValue - childDeductions);
+      const usdValue =
+        transferStatus === "received" && transferMove?.amountUsd
+          ? transferMove.amountUsd
+          : usdPerPhi != null
+            ? netPhi * usdPerPhi
+            : null;
 
       out.set(node.id, {
         basePhi,
-        netPhi,
+        netPhi: Number.isFinite(netPhi) ? netPhi : null,
         usdValue,
         usdPerPhi,
         transferMove,
+        receivedAmount,
       });
-      node.children.forEach(walk);
+
+      return receivedAmount;
     };
 
     for (const root of forest) walk(root);
     return out;
-  }, [forest, nowPulse, transferRegistry]);
+  }, [forest, nowPulse, receiveLocks, transferRegistry]);
 
   const phiTotalsByPulse = useMemo((): ReadonlyMap<number, number> => {
     const totals = new Map<number, number>();
