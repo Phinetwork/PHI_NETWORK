@@ -579,7 +579,7 @@ function SigilTreeNode({
           )}
           {transferStatus && (
             <span className={`phi-status phi-status--${transferStatus}`} title={`Transfer ${transferStatus}`}>
-              {transferStatus === "received" ? "Received" : "Pending"}
+              {transferStatus === "received" ? "Inhaled" : "Exhaled"}
             </span>
           )}
 

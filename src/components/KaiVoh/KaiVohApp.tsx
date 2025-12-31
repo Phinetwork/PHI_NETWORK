@@ -342,8 +342,44 @@ interface SessionHudProps {
   hasConnectedAccounts: boolean;
   onLogout: () => void;
   onNewPost: () => void;
-  livePulse?: number | null;
-  msToNextPulse?: number | null;
+}
+
+function useLivePulseTicker(enabled: boolean): {
+  livePulse: number | null;
+  msToNextPulse: number | null;
+} {
+  const [livePulse, setLivePulse] = useState<number | null>(null);
+  const [msToNextPulse, setMsToNextPulse] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+
+    const tick = async (): Promise<void> => {
+      const now = new Date();
+      const kai = await fetchKaiOrLocal(undefined, now);
+      if (cancelled) return;
+
+      const pulseNow = kai.pulse;
+      const nextPulseMsBI = epochMsFromPulse(pulseNow + 1);
+
+      let remaining = Number(nextPulseMsBI - BigInt(now.getTime()));
+      if (!Number.isFinite(remaining) || remaining < 0) remaining = 0;
+
+      setLivePulse(pulseNow);
+      setMsToNextPulse(remaining);
+    };
+
+    void tick();
+    const timer = window.setInterval(() => void tick(), 250);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [enabled]);
+
+  return { livePulse, msToNextPulse };
 }
 
 function SessionHud({
@@ -352,9 +388,8 @@ function SessionHud({
   hasConnectedAccounts,
   onLogout,
   onNewPost,
-  livePulse,
-  msToNextPulse,
 }: SessionHudProps): ReactElement {
+  const { livePulse, msToNextPulse } = useLivePulseTicker(Boolean(session));
   const ledgerCount = session.postLedger?.length ?? 0;
   const pulseDisplay = livePulse ?? session.pulse;
   const countdownLabel = formatCountdown(msToNextPulse);
@@ -490,37 +525,6 @@ function KaiVohFlow(): ReactElement {
   const [verifierData, setVerifierData] = useState<VerifierData | null>(null);
 
   const [flowError, setFlowError] = useState<string | null>(null);
-
-  /* Live Kai pulse + countdown (KKS v1) */
-  const [livePulse, setLivePulse] = useState<number | null>(null);
-  const [msToNextPulse, setMsToNextPulse] = useState<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const tick = async (): Promise<void> => {
-      const now = new Date();
-      const kai = await fetchKaiOrLocal(undefined, now);
-      if (cancelled) return;
-
-      const pulseNow = kai.pulse;
-      const nextPulseMsBI = epochMsFromPulse(pulseNow + 1);
-
-      let remaining = Number(nextPulseMsBI - BigInt(now.getTime()));
-      if (!Number.isFinite(remaining) || remaining < 0) remaining = 0;
-
-      setLivePulse(pulseNow);
-      setMsToNextPulse(remaining);
-    };
-
-    void tick();
-    const timer = window.setInterval(() => void tick(), 250);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const hasConnectedAccounts = useMemo(() => {
     if (!session || !session.connectedAccounts) return false;
@@ -1007,8 +1011,6 @@ function KaiVohFlow(): ReactElement {
         hasConnectedAccounts={hasConnectedAccounts}
         onLogout={handleLogout}
         onNewPost={handleNewPost}
-        livePulse={livePulse}
-        msToNextPulse={msToNextPulse}
       />
 
       <main className="kv-main-card">

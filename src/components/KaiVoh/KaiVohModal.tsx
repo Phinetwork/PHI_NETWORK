@@ -19,6 +19,7 @@ import "./styles/KaiVohModal.css";
 import KaiVohBoundary from "./KaiVohBoundary";
 import { SigilAuthProvider } from "./SigilAuthProvider";
 import { useSigilAuth } from "./useSigilAuth";
+import { clearSessionStorage } from "../session/sessionStorage";
 
 /** Lazy chunks */
 const KaiVohApp = lazy(() => import("./KaiVohApp"));
@@ -158,6 +159,11 @@ function shouldSuppressEnter(el: Element | null): boolean {
 }
 
 export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
+  const handleClose = useCallback((): void => {
+    clearSessionStorage();
+    onClose();
+  }, [onClose]);
+
   // Hooks MUST run unconditionally (rules-of-hooks)
   const rootRef = useRef<HTMLDivElement | null>(null);
   const firstFocusableRef = useRef<HTMLButtonElement | null>(null);
@@ -324,7 +330,7 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
         if (isEditableElement(document.activeElement)) return;
         e.preventDefault();
         e.stopPropagation();
-        onClose();
+        handleClose();
         return;
       }
 
@@ -434,15 +440,15 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       const y = lockedScrollYRef.current || 0;
       window.scrollTo(0, y);
     };
-  }, [open, onClose, viewportVars.breath, viewportVars.phi]);
+  }, [open, handleClose, viewportVars.breath, viewportVars.phi]);
 
   // Close button handlers
   const handleClosePointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>): void => {
       e.stopPropagation();
-      onClose();
+      handleClose();
     },
-    [onClose]
+    [handleClose]
   );
 
   const handleCloseKeyDown = useCallback(
@@ -450,10 +456,10 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         e.stopPropagation();
-        onClose();
+        handleClose();
       }
     },
-    [onClose]
+    [handleClose]
   );
 
   // After hooks are declared, it's safe to early-return
