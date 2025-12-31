@@ -106,7 +106,7 @@ import { computeZkPoseidonHash } from "../../utils/kai";
 import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import type { SigilProofHints } from "../../types/sigil";
 import type { SigilSharePayloadLoose } from "../SigilExplorer/types";
-import { apiFetchJsonWithFailover, API_URLS_PATH } from "../SigilExplorer/apiClient";
+import { apiFetchWithFailover, API_URLS_PATH } from "../SigilExplorer/apiClient";
 import { extractPayloadFromUrl } from "../SigilExplorer/url";
 import { enqueueInhaleKrystal, flushInhaleQueue } from "../SigilExplorer/inhaleQueue";
 import { memoryRegistry, isOnline } from "../SigilExplorer/registryStore";
@@ -742,7 +742,7 @@ const VerifierStamperInner: React.FC = () => {
       let failed = false;
       for (let page = 0; page < RECEIVE_REMOTE_PAGES; page += 1) {
         const offset = page * RECEIVE_REMOTE_LIMIT;
-        const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
+        const res = await apiFetchWithFailover(
           (base) => {
             const url = new URL(API_URLS_PATH, base);
             url.searchParams.set("offset", String(offset));
@@ -752,13 +752,27 @@ const VerifierStamperInner: React.FC = () => {
           { method: "GET", cache: "no-store" }
         );
 
-        if (!r.ok) {
+        if (!res) {
+          failed = true;
+          break;
+        }
+
+        if (!res.ok && res.status !== 304) {
           failed = true;
           break;
         }
         hadSuccess = true;
 
-        const urls = r.value.urls;
+        let urls: unknown = [];
+        if (res.status !== 304) {
+          try {
+            const responsePayload = (await res.json()) as Partial<ApiUrlsPageResponse> | null;
+            urls = responsePayload?.urls ?? [];
+          } catch {
+            urls = [];
+          }
+        }
+
         if (!Array.isArray(urls) || urls.length === 0) break;
 
         for (const rawUrl of urls) {
