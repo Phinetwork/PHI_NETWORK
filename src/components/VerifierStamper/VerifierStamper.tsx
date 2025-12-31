@@ -738,6 +738,8 @@ const VerifierStamperInner: React.FC = () => {
 
       let found = false;
       let checked = false;
+      let hadSuccess = false;
+      let failed = false;
       for (let page = 0; page < RECEIVE_REMOTE_PAGES; page += 1) {
         const offset = page * RECEIVE_REMOTE_LIMIT;
         const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
@@ -750,8 +752,11 @@ const VerifierStamperInner: React.FC = () => {
           { method: "GET", cache: "no-store" }
         );
 
-        if (!r.ok) break;
-        checked = true;
+        if (!r.ok) {
+          failed = true;
+          break;
+        }
+        hadSuccess = true;
 
         const urls = r.value.urls;
         if (!Array.isArray(urls) || urls.length === 0) break;
@@ -780,6 +785,7 @@ const VerifierStamperInner: React.FC = () => {
         if (urls.length < RECEIVE_REMOTE_LIMIT) break;
       }
 
+      checked = hadSuccess && !failed;
       const result = { found, checked };
       if (checked) {
         receiveRemoteCache.current.set(cacheKey, result);
