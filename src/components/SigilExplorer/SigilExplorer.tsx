@@ -471,11 +471,12 @@ function buildDetailEntries(
   if (valueSnapshot?.usdValue !== null && valueSnapshot?.usdValue !== undefined) {
     entries.push({ label: "Live USD", value: `$${formatUsd(valueSnapshot.usdValue)}` });
   }
-  if (valueSnapshot?.pendingFromChildren) {
+  const pendingTotal = (valueSnapshot?.pendingFromChildren ?? 0) + (valueSnapshot?.pendingFromParent ?? 0);
+  if (pendingTotal > 0) {
     entries.push({
-      label: "Pending inhales",
-      value: renderPhiAmount(valueSnapshot.pendingFromChildren, { sign: "-" }),
-      valueText: `-${formatPhi(valueSnapshot.pendingFromChildren)} ${PHI_TEXT}`,
+      label: "Pending exhales",
+      value: renderPhiAmount(pendingTotal, { sign: "-" }),
+      valueText: `-${formatPhi(pendingTotal)} ${PHI_TEXT}`,
     });
   }
 
@@ -698,12 +699,12 @@ function SigilTreeNode({
   const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
   const livePhi = valueSnapshot?.netPhi ?? null;
   const liveUsd = valueSnapshot?.usdValue ?? null;
-  const pendingOut = valueSnapshot?.pendingFromChildren ?? 0;
+  const pendingOut = (valueSnapshot?.pendingFromChildren ?? 0) + (valueSnapshot?.pendingFromParent ?? 0);
   const pendingTitle =
     pendingOut > 0 && livePhi !== null
-      ? `Pending inhales: -${formatPhi(pendingOut)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, livePhi - pendingOut))} ${PHI_TEXT}`
+      ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, livePhi))} ${PHI_TEXT}`
       : pendingOut > 0
-        ? `Pending inhales: -${formatPhi(pendingOut)} ${PHI_TEXT}`
+        ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT}`
         : undefined;
   const liveTitle =
     livePhi !== null
@@ -884,7 +885,7 @@ function OriginPanel({
 
   const branchValue = useMemo(() => {
     let derivedPhi = 0;
-    let pendingPhi = 0;
+    let pendingPhi = rootSnapshot?.pendingFromParent ?? 0;
     for (const child of root.children) {
       const snap = valueSnapshots.get(child.id);
       if (snap?.receivedAmount) derivedPhi += snap.receivedAmount;
@@ -907,9 +908,9 @@ function OriginPanel({
       : undefined;
   const originPendingTitle =
     branchValue.pendingPhi > 0 && branchValue.netPhi != null
-      ? `Pending inhales: -${formatPhi(branchValue.pendingPhi)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, branchValue.netPhi - branchValue.pendingPhi))} ${PHI_TEXT}`
+      ? `Pending exhales: -${formatPhi(branchValue.pendingPhi)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, branchValue.netPhi))} ${PHI_TEXT}`
       : branchValue.pendingPhi > 0
-        ? `Pending inhales: -${formatPhi(branchValue.pendingPhi)} ${PHI_TEXT}`
+        ? `Pending exhales: -${formatPhi(branchValue.pendingPhi)} ${PHI_TEXT}`
         : undefined;
 
   return (

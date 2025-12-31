@@ -1068,8 +1068,8 @@
 }
 
 .phi-status--received{
-  color: color-mix(in oklab, var(--sx-ok) 75%, #fff);
-  border-color: color-mix(in oklab, var(--sx-ok) 60%, rgba(255,255,255,0.18));
+  color: color-mix(in oklab, var(--sx-bad) 75%, #fff);
+  border-color: color-mix(in oklab, var(--sx-bad) 60%, rgba(255,255,255,0.18));
 }
 
 /* Copy button */
