@@ -1266,9 +1266,18 @@ const VerifierStamperInner: React.FC = () => {
   }
 
   const shareTransferLink = useCallback(async (m: SigilMetadata, transferAmountPhi?: string) => {
-    const parentCanonical =
-      (m.canonicalHash as string | undefined)?.toLowerCase() ||
-      (await sha256Hex(`${m.pulse}|${m.beat}|${m.stepIndex}|${m.chakraDay}`)).toLowerCase();
+    let parentCanonical = (m.canonicalHash as string | undefined)?.toLowerCase() ?? "";
+    if (!parentCanonical) {
+      try {
+        const eff = await computeEffectiveCanonical(m);
+        parentCanonical = eff.canonical;
+      } catch (err) {
+        logError("shareTransferLink.computeCanonical", err);
+      }
+    }
+    if (!parentCanonical) {
+      parentCanonical = (await sha256Hex(`${m.pulse}|${m.beat}|${m.stepIndex}|${m.chakraDay}`)).toLowerCase();
+    }
 
     const last = (m.transfers ?? []).slice(-1)[0];
     const hardenedLast = (m.hardenedTransfers ?? []).slice(-1)[0];
