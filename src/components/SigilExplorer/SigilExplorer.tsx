@@ -95,6 +95,7 @@ import {
   type SigilTransferRecord,
   type TransferMove,
 } from "./transfers";
+import type { SigilSharePayloadLoose } from "./types";
 import { registerSigilUrl as registerSigilUrlGlobal } from "../../utils/sigilRegistry";
 import { stepIndexFromPulseExact } from "../../utils/kai_pulse";
 
@@ -264,10 +265,80 @@ function resolveTransferMoveForNode(
   return undefined;
 }
 
+type ReceiveLockIndex = {
+  nonces: Set<string>;
+  canonicals: Set<string>;
+};
+
+function readTransferDirectionValue(value: unknown): "send" | "receive" | null {
+  if (typeof value !== "string") return null;
+  const t = value.trim().toLowerCase();
+  if (!t) return null;
+  if (t.includes("receive") || t.includes("received") || t.includes("inhale")) return "receive";
+  if (t.includes("send") || t.includes("sent") || t.includes("exhale")) return "send";
+  return null;
+}
+
+function readTransferDirectionFromPayload(payload: SigilSharePayloadLoose): "send" | "receive" | null {
+  const record = payload as Record<string, unknown>;
+  return (
+    readTransferDirectionValue(record.transferDirection) ||
+    readTransferDirectionValue(record.transferMode) ||
+    readTransferDirectionValue(record.transferKind) ||
+    readTransferDirectionValue(record.phiDirection)
+  );
+}
+
+function readPayloadNonce(payload: SigilSharePayloadLoose): string | null {
+  const record = payload as Record<string, unknown>;
+  const raw = record.transferNonce ?? record.nonce;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function readPayloadCanonical(payload: SigilSharePayloadLoose): string | null {
+  const record = payload as Record<string, unknown>;
+  const raw = record.canonicalHash ?? record.childHash ?? record.hash;
+  return typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : null;
+}
+
+function buildReceiveLockIndex(registry: typeof memoryRegistry): ReceiveLockIndex {
+  const nonces = new Set<string>();
+  const canonicals = new Set<string>();
+
+  for (const payload of registry.values()) {
+    if (readTransferDirectionFromPayload(payload) !== "receive") continue;
+    const nonce = readPayloadNonce(payload);
+    if (nonce) nonces.add(nonce);
+    const canonical = readPayloadCanonical(payload);
+    if (canonical) canonicals.add(canonical);
+  }
+
+  return { nonces, canonicals };
+}
+
+function resolveTransferStatusForNode(
+  node: SigilNode,
+  transferRegistry: ReadonlyMap<string, SigilTransferRecord>,
+  receiveLocks: ReceiveLockIndex,
+): "pending" | "received" | null {
+  const transferMove = resolveTransferMoveForNode(node, transferRegistry);
+  if (!transferMove) return null;
+  if (transferMove.direction === "receive") return "received";
+
+  const nonce = readPayloadNonce(node.payload);
+  if (nonce && receiveLocks.nonces.has(nonce)) return "received";
+
+  const canonical = resolveCanonicalHashFromNode(node);
+  if (canonical && receiveLocks.canonicals.has(canonical)) return "received";
+
+  return "pending";
+}
+
 function buildDetailEntries(
   node: SigilNode,
   usernameClaims: UsernameClaimRegistry,
   transferRegistry: ReadonlyMap<string, SigilTransferRecord>,
+  receiveLocks: ReceiveLockIndex,
 ): DetailEntry[] {
   const record = node.payload as unknown as Record<string, unknown>;
   const entries: DetailEntry[] = [];
@@ -278,6 +349,13 @@ function buildDetailEntries(
 
   const transferMove = resolveTransferMoveForNode(node, transferRegistry);
   if (transferMove) {
+    const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
+    if (transferStatus) {
+      entries.push({
+        label: "Transfer status",
+        value: transferStatus === "received" ? "Already received" : "Pending receipt",
+      });
+    }
     entries.push({
       label: `Φ ${transferMove.direction === "receive" ? "Received" : "Sent"}`,
       value: `${transferMove.direction === "receive" ? "+" : "-"}${formatPhi(transferMove.amount)} Φ`,
@@ -427,6 +505,7 @@ type SigilTreeNodeProps = {
   phiTotalsByPulse: ReadonlyMap<number, number>;
   usernameClaims: UsernameClaimRegistry;
   transferRegistry: ReadonlyMap<string, SigilTransferRecord>;
+  receiveLocks: ReceiveLockIndex;
 };
 
 function SigilTreeNode({
@@ -436,6 +515,7 @@ function SigilTreeNode({
   phiTotalsByPulse,
   usernameClaims,
   transferRegistry,
+  receiveLocks,
 }: SigilTreeNodeProps) {
   const open = expanded.has(node.id);
 
@@ -449,8 +529,9 @@ function SigilTreeNode({
   const phiSentFromPulse = pulseKey != null ? phiTotalsByPulse.get(pulseKey) : undefined;
 
   const openHref = explorerOpenUrl(node.url);
-  const detailEntries = open ? buildDetailEntries(node, usernameClaims, transferRegistry) : [];
+  const detailEntries = open ? buildDetailEntries(node, usernameClaims, transferRegistry, receiveLocks) : [];
   const transferMove = resolveTransferMoveForNode(node, transferRegistry);
+  const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
 
   return (
     <div className="node" style={chakraTintStyle(chakraDay)} data-chakra={String(chakraDay ?? "")} data-node-id={node.id}>
@@ -496,6 +577,11 @@ function SigilTreeNode({
               {transferMove.amountUsd !== undefined && <span className="phi-move__usd">${formatUsd(transferMove.amountUsd)}</span>}
             </span>
           )}
+          {transferStatus && (
+            <span className={`phi-status phi-status--${transferStatus}`} title={`Transfer ${transferStatus}`}>
+              {transferStatus === "received" ? "Already received" : "Pending"}
+            </span>
+          )}
 
           {phiSentFromPulse !== undefined && (
             <span className="phi-pill" title={`Total Φ on pulse ${(node.payload as { pulse?: number }).pulse ?? ""}`}>
@@ -539,6 +625,7 @@ function SigilTreeNode({
                   phiTotalsByPulse={phiTotalsByPulse}
                   usernameClaims={usernameClaims}
                   transferRegistry={transferRegistry}
+                  receiveLocks={receiveLocks}
                 />
               ))}
             </div>
@@ -556,6 +643,7 @@ function OriginPanel({
   phiTotalsByPulse,
   usernameClaims,
   transferRegistry,
+  receiveLocks,
 }: {
   root: SigilNode;
   expanded: ReadonlySet<string>;
@@ -563,6 +651,7 @@ function OriginPanel({
   phiTotalsByPulse: ReadonlyMap<number, number>;
   usernameClaims: UsernameClaimRegistry;
   transferRegistry: ReadonlyMap<string, SigilTransferRecord>;
+  receiveLocks: ReceiveLockIndex;
 }) {
   const count = useMemo(() => {
     let n = 0;
@@ -620,6 +709,7 @@ function OriginPanel({
                 phiTotalsByPulse={phiTotalsByPulse}
                 usernameClaims={usernameClaims}
                 transferRegistry={transferRegistry}
+                receiveLocks={receiveLocks}
               />
             ))}
           </div>
@@ -1396,6 +1486,7 @@ const SigilExplorer: React.FC = () => {
 
   const forest = useMemo(() => buildForest(memoryRegistry), [registryRev]);
   const transferRegistry = useMemo(() => readSigilTransferRegistry(), [transferRev]);
+  const receiveLocks = useMemo(() => buildReceiveLockIndex(memoryRegistry), [registryRev, transferRev]);
 
   const totalKeys = useMemo(() => {
     let n = 0;
@@ -1661,6 +1752,7 @@ const SigilExplorer: React.FC = () => {
                   phiTotalsByPulse={phiTotalsByPulse}
                   usernameClaims={usernameClaims}
                   transferRegistry={transferRegistry}
+                  receiveLocks={receiveLocks}
                 />
               ))}
             </div>
