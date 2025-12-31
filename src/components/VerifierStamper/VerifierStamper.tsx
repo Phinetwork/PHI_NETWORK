@@ -106,7 +106,7 @@ import { computeZkPoseidonHash } from "../../utils/kai";
 import { generateZkProofFromPoseidonHash } from "../../utils/zkProof";
 import type { SigilProofHints } from "../../types/sigil";
 import type { SigilSharePayloadLoose } from "../SigilExplorer/types";
-import { apiFetchWithFailover, API_URLS_PATH } from "../SigilExplorer/apiClient";
+import { apiFetchWithFailover, API_URLS_PATH, loadApiBackupDeadUntil, loadApiBaseHint } from "../SigilExplorer/apiClient";
 import { extractPayloadFromUrl } from "../SigilExplorer/url";
 import { enqueueInhaleKrystal, flushInhaleQueue } from "../SigilExplorer/inhaleQueue";
 import { memoryRegistry, isOnline } from "../SigilExplorer/registryStore";
@@ -278,6 +278,11 @@ const VerifierStamperInner: React.FC = () => {
   useEffect(() => {
     const id = window.setInterval(() => setPulseNow(kaiPulseNow()), 1000);
     return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    loadApiBackupDeadUntil();
+    loadApiBaseHint();
   }, []);
 
   const [svgURL, setSvgURL] = useState<string | null>(null);
