@@ -494,7 +494,7 @@ const VerifierStamperInner: React.FC = () => {
 
   const [canonical, setCanonical] = useState<string | null>(null);
   const [canonicalContext, setCanonicalContext] = useState<"parent" | "derivative" | null>(null);
-  const receiveRemoteCache = useRef<Map<string, boolean>>(new Map());
+  const receiveRemoteCache = useRef<Map<string, { found: boolean; checked: boolean }>>(new Map());
 
   const openVerifier = () => safeShowDialog(dlgRef.current);
 
@@ -726,17 +726,18 @@ const VerifierStamperInner: React.FC = () => {
     [buildReceiveLockKeys]
   );
 
-  const hasRemoteReceiveLock = useCallback(
-    async (m: SigilMetadata): Promise<boolean> => {
-      if (!isOnline()) return false;
+  const checkRemoteReceiveLock = useCallback(
+    async (m: SigilMetadata): Promise<{ found: boolean; checked: boolean }> => {
+      if (!isOnline()) return { found: false, checked: false };
       const { canonical, nonce } = await buildReceiveLockKeys(m);
-      if (!canonical && !nonce) return false;
+      if (!canonical && !nonce) return { found: false, checked: false };
 
       const cacheKey = `${canonical ?? ""}|${nonce ?? ""}`;
       const cached = receiveRemoteCache.current.get(cacheKey);
       if (cached !== undefined) return cached;
 
       let found = false;
+      let checked = false;
       for (let page = 0; page < RECEIVE_REMOTE_PAGES; page += 1) {
         const offset = page * RECEIVE_REMOTE_LIMIT;
         const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
@@ -750,6 +751,7 @@ const VerifierStamperInner: React.FC = () => {
         );
 
         if (!r.ok) break;
+        checked = true;
 
         const urls = r.value.urls;
         if (!Array.isArray(urls) || urls.length === 0) break;
@@ -778,10 +780,21 @@ const VerifierStamperInner: React.FC = () => {
         if (urls.length < RECEIVE_REMOTE_LIMIT) break;
       }
 
-      receiveRemoteCache.current.set(cacheKey, found);
-      return found;
+      const result = { found, checked };
+      if (checked) {
+        receiveRemoteCache.current.set(cacheKey, result);
+      }
+      return result;
     },
     [buildReceiveLockKeys]
+  );
+
+  const hasRemoteReceiveLock = useCallback(
+    async (m: SigilMetadata): Promise<boolean> => {
+      const result = await checkRemoteReceiveLock(m);
+      return result.found;
+    },
+    [checkRemoteReceiveLock]
   );
 
   const hasReceiveLock = useCallback(
@@ -2116,7 +2129,24 @@ const VerifierStamperInner: React.FC = () => {
   const receive = async () => {
     if (!meta || !svgURL || !liveSig) return;
 
-    if (await hasReceiveLock(meta)) {
+    if (!isOnline()) {
+      setError("Online connection required to verify global receive lock.");
+      return;
+    }
+
+    const remoteCheck = await checkRemoteReceiveLock(meta);
+    if (!remoteCheck.checked) {
+      setError("Unable to verify the global receive lock. Please try again.");
+      return;
+    }
+
+    if (remoteCheck.found) {
+      setError("This transfer has already been received.");
+      setReceiveStatus("already");
+      return;
+    }
+
+    if ((await hasLocalReceiveLock(meta)) || (await hasRegistryReceiveLock(meta))) {
       setError("This transfer has already been received.");
       setReceiveStatus("already");
       return;
@@ -2669,7 +2699,7 @@ const VerifierStamperInner: React.FC = () => {
                           k="Receive claim:"
                           v={
                             receiveStatus === "already" ? (
-                              "Already received"
+                              "Received"
                             ) : receiveStatus === "new" ? (
                               <>
                                 New receive{" "}

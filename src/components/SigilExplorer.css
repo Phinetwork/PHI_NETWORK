@@ -938,6 +938,31 @@
   opacity: 0.85;
 }
 
+.phi-status{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background:
+    radial-gradient(140% 220% at 0% 0%, rgba(255,255,255,0.08), transparent 62%),
+    linear-gradient(180deg, rgba(7,12,14,0.68), rgba(7,12,14,0.48));
+}
+
+.phi-status--pending{
+  color: color-mix(in oklab, var(--sx-warn) 75%, #fff);
+  border-color: color-mix(in oklab, var(--sx-warn) 60%, rgba(255,255,255,0.18));
+}
+
+.phi-status--received{
+  color: color-mix(in oklab, var(--sx-ok) 75%, #fff);
+  border-color: color-mix(in oklab, var(--sx-ok) 60%, rgba(255,255,255,0.18));
+}
+
 /* Copy button */
 .node-copy{
   width: 30px;
