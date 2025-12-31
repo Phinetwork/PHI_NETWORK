@@ -238,6 +238,22 @@ function readPayloadNonce(payload: SigilSharePayloadLoose): string | null {
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
+function hasReceiveProofFields(payload: SigilSharePayloadLoose): boolean {
+  const record = payload as Record<string, unknown>;
+  const readFlag = (src: Record<string, unknown> | null) => {
+    if (!src) return false;
+    if (typeof src.receiverSignature === "string" && src.receiverSignature.trim()) return true;
+    if (typeof src.receiverStamp === "string" && src.receiverStamp.trim()) return true;
+    return typeof src.receiverKaiPulse === "number" && Number.isFinite(src.receiverKaiPulse);
+  };
+  const feed = isRecord(record.feed) ? (record.feed as Record<string, unknown>) : null;
+  return readFlag(record) || readFlag(feed);
+}
+
+function isReceiveLockPayload(payload: SigilSharePayloadLoose): boolean {
+  return readTransferDirectionFromPayload(payload) === "receive" || hasReceiveProofFields(payload);
+}
+
 function collectReceiveSigHistory(raw: Record<string, unknown>, nextSig?: ReceiveSig | null): ReceiveSig[] {
   const history: ReceiveSig[] = [];
   const existing = raw.receiveSigHistory;
@@ -741,7 +757,7 @@ const VerifierStamperInner: React.FC = () => {
       if (!canonical && !nonce) return false;
 
       for (const payload of memoryRegistry.values()) {
-        if (readTransferDirectionFromPayload(payload) !== "receive") continue;
+        if (!isReceiveLockPayload(payload)) continue;
         const payloadCanonical = readPayloadCanonical(payload);
         const payloadNonce = readPayloadNonce(payload);
         if (nonce) {
@@ -809,7 +825,7 @@ const VerifierStamperInner: React.FC = () => {
           if (typeof rawUrl !== "string") continue;
           const payload = extractPayloadFromUrl(rawUrl);
           if (!payload) continue;
-          if (readTransferDirectionFromPayload(payload) !== "receive") continue;
+          if (!isReceiveLockPayload(payload)) continue;
           const payloadCanonical = readPayloadCanonical(payload);
           const payloadNonce = readPayloadNonce(payload);
           if (nonce) {
