@@ -464,20 +464,28 @@ function buildDetailEntries(
   const entries: DetailEntry[] = [];
   const usedKeys = new Set<string>();
   const inhaleLabel = resolveInhaleLabel(node);
+  const transferMove = resolveTransferMoveForNode(node, transferRegistry);
+  const transferStatus = transferMove ? resolveTransferStatusForNode(node, transferRegistry, receiveLocks) : null;
+  const displayLivePhi =
+    transferStatus === "pending" && transferMove ? transferMove.amount : (valueSnapshot?.netPhi ?? null);
+  const displayUsdValue =
+    transferStatus === "pending" && transferMove
+      ? transferMove.amountUsd ?? (valueSnapshot?.usdPerPhi != null ? transferMove.amount * valueSnapshot.usdPerPhi : null)
+      : (valueSnapshot?.usdValue ?? null);
 
-  if (valueSnapshot?.netPhi !== null && valueSnapshot?.netPhi !== undefined) {
+  if (displayLivePhi !== null && displayLivePhi !== undefined) {
     entries.push({
       label: (
         <span className="phi-detail__label">
           Live <PhiMark className="phi-detail__mark" /> value
         </span>
       ),
-      value: renderPhiAmount(valueSnapshot.netPhi),
-      valueText: `${formatPhi(valueSnapshot.netPhi)} ${PHI_TEXT}`,
+      value: renderPhiAmount(displayLivePhi),
+      valueText: `${formatPhi(displayLivePhi)} ${PHI_TEXT}`,
     });
   }
-  if (valueSnapshot?.usdValue !== null && valueSnapshot?.usdValue !== undefined) {
-    entries.push({ label: "Live USD", value: `$${formatUsd(valueSnapshot.usdValue)}` });
+  if (displayUsdValue !== null && displayUsdValue !== undefined) {
+    entries.push({ label: "Live USD", value: `$${formatUsd(displayUsdValue)}` });
   }
   const pendingTotal = (valueSnapshot?.pendingFromChildren ?? 0) + (valueSnapshot?.pendingFromParent ?? 0);
   if (pendingTotal > 0) {
@@ -514,9 +522,7 @@ function buildDetailEntries(
     });
   }
 
-  const transferMove = resolveTransferMoveForNode(node, transferRegistry);
   if (transferMove) {
-    const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
     if (transferStatus) {
       entries.push({
         label: "Transfer status",
@@ -719,16 +725,23 @@ function SigilTreeNode({
   const inhaleLabel = resolveInhaleLabel(node);
   const livePhi = valueSnapshot?.netPhi ?? null;
   const liveUsd = valueSnapshot?.usdValue ?? null;
+  const displayLivePhi = transferStatus === "pending" && transferMove ? transferMove.amount : livePhi;
+  const displayLiveUsd =
+    transferStatus === "pending" && transferMove
+      ? transferMove.amountUsd ?? (valueSnapshot?.usdPerPhi != null ? transferMove.amount * valueSnapshot.usdPerPhi : null)
+      : liveUsd;
   const pendingOut = (valueSnapshot?.pendingFromChildren ?? 0) + (valueSnapshot?.pendingFromParent ?? 0);
   const pendingTitle =
-    pendingOut > 0 && livePhi !== null
-      ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, livePhi))} ${PHI_TEXT}`
+    pendingOut > 0 && displayLivePhi !== null
+      ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT} • Remaining ${formatPhi(Math.max(0, displayLivePhi))} ${PHI_TEXT}`
       : pendingOut > 0
         ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT}`
         : undefined;
   const liveTitle =
-    livePhi !== null
-      ? `Live value: ${formatPhi(livePhi)} ${PHI_TEXT}${liveUsd !== null ? ` • $${formatUsd(liveUsd)}` : ""}`
+    displayLivePhi !== null
+      ? `Live value: ${formatPhi(displayLivePhi)} ${PHI_TEXT}${
+          displayLiveUsd !== null ? ` • $${formatUsd(displayLiveUsd)}` : ""
+        }`
       : undefined;
   const transferDisplay =
     transferMove && transferStatus === "received"
@@ -800,18 +813,18 @@ function SigilTreeNode({
             </span>
           )}
 
-          {livePhi !== null && (
+          {displayLivePhi !== null && (
             <span className="phi-pill phi-pill--live" title={liveTitle}>
               <span className="phi-pill__label">
                 <PhiMark className="phi-pill__mark" />
                 live:
               </span>
-              {renderPhiAmount(livePhi)}
+              {renderPhiAmount(displayLivePhi)}
             </span>
           )}
-          {liveUsd !== null && (
+          {displayLiveUsd !== null && (
             <span className="phi-pill phi-pill--usd" title={liveTitle}>
-              ${formatUsd(liveUsd)}
+              ${formatUsd(displayLiveUsd)}
             </span>
           )}
           {pendingOut > 0 && (
