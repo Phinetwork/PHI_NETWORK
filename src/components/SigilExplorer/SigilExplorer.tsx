@@ -711,9 +711,9 @@ function SigilTreeNode({
       : undefined;
   const transferDisplay =
     transferMove && transferStatus === "received"
-      ? { direction: "receive" as const, sign: "+", titleVerb: "inhaled" }
+      ? { direction: "send" as const, sign: "-", titleVerb: "inhaled" }
       : transferMove
-        ? { direction: "send" as const, sign: "-", titleVerb: "exhaled" }
+        ? { direction: "pending" as const, sign: "-", titleVerb: "exhaled" }
         : null;
 
   return (
