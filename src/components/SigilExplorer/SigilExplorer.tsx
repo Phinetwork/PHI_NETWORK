@@ -730,13 +730,20 @@ function SigilTreeNode({
     transferStatus === "pending" && transferMove
       ? transferMove.amountUsd ?? (valueSnapshot?.usdPerPhi != null ? transferMove.amount * valueSnapshot.usdPerPhi : null)
       : liveUsd;
-  const pendingOut = (valueSnapshot?.pendingFromChildren ?? 0) + (valueSnapshot?.pendingFromParent ?? 0);
+  const pendingFromChildren = valueSnapshot?.pendingFromChildren ?? 0;
+  const derivedFromChildren = valueSnapshot?.receivedFromChildren ?? 0;
   const pendingTitle =
-    pendingOut > 0 && displayLivePhi !== null
-      ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT} • Live ${formatPhi(Math.max(0, displayLivePhi))} ${PHI_TEXT}`
-      : pendingOut > 0
-        ? `Pending exhales: -${formatPhi(pendingOut)} ${PHI_TEXT}`
+    pendingFromChildren > 0 && displayLivePhi !== null
+      ? `Pending exhales: -${formatPhi(pendingFromChildren)} ${PHI_TEXT} • Live ${formatPhi(Math.max(0, displayLivePhi))} ${PHI_TEXT}`
+      : pendingFromChildren > 0
+        ? `Pending exhales: -${formatPhi(pendingFromChildren)} ${PHI_TEXT}`
         : undefined;
+  const derivedTitle =
+    derivedFromChildren > 0
+      ? `Derived exhales: -${formatPhi(derivedFromChildren)} ${PHI_TEXT}${
+          displayLivePhi !== null ? ` • Live ${formatPhi(Math.max(0, displayLivePhi))} ${PHI_TEXT}` : ""
+        }`
+      : undefined;
   const liveTitle =
     displayLivePhi !== null
       ? `Live value: ${formatPhi(displayLivePhi)} ${PHI_TEXT}${
@@ -826,14 +833,19 @@ function SigilTreeNode({
               ${formatUsd(displayLiveUsd)}
             </span>
           )}
-          {pendingOut > 0 && !(transferStatus === "pending" && inhaleLabel === "exhale") && (
+          {derivedFromChildren > 0 && (
+            <span className="phi-pill phi-pill--drain" title={derivedTitle}>
+              Derived {renderPhiAmount(derivedFromChildren, { sign: "-" })}
+            </span>
+          )}
+          {pendingFromChildren > 0 && !(transferStatus === "pending" && inhaleLabel === "exhale") && (
             <span className="phi-pill phi-pill--pending" title={pendingTitle}>
-              Pending
+              Pending {renderPhiAmount(pendingFromChildren, { sign: "-" })}
             </span>
           )}
           {transferStatus === "pending" && transferMove && inhaleLabel === "exhale" && (
             <span className="phi-pill phi-pill--pending" title="Pending exhale">
-              Pending
+              Pending {renderPhiAmount(transferMove.amount, { sign: "-" })}
             </span>
           )}
           {transferStatus === "received" && transferMove && inhaleLabel === "exhale" && (
