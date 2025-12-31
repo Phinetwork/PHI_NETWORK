@@ -725,6 +725,8 @@ function SigilTreeNode({
   const transferMove = resolveTransferMoveForNode(node, transferRegistry);
   const transferStatus = resolveTransferStatusForNode(node, transferRegistry, receiveLocks);
   const inhaleLabel = resolveInhaleLabel(node);
+  const hasChildren = node.children.length > 0;
+  const showOwnTransfer = !hasChildren;
   const livePhi = valueSnapshot?.netPhi ?? null;
   const liveUsd = valueSnapshot?.usdValue ?? null;
   const displayLivePhi = transferStatus === "pending" && transferMove ? transferMove.amount : livePhi;
@@ -757,7 +759,7 @@ function SigilTreeNode({
           displayLivePhi !== null ? ` • Live ${formatPhi(Math.max(0, displayLivePhi))} ${PHI_TEXT}` : ""
         }`
       : undefined;
-  const showPendingSend = pendingFromParent > 0 && node.children.length === 0;
+  const showPendingSend = showOwnTransfer && pendingFromParent > 0 && transferStatus !== "pending";
   const derivedTitle =
     derivedFromChildren > 0
       ? `Derived exhales: -${formatPhi(derivedFromChildren)} ${PHI_TEXT}${
@@ -806,7 +808,7 @@ function SigilTreeNode({
             </span>
           )}
 
-          {transferMove && transferDisplay && (
+          {showOwnTransfer && transferMove && transferDisplay && (
             <span
               className={`phi-move phi-move--${transferDisplay.direction}`}
               title={`Phi ${transferDisplay.titleVerb}${transferStatus === "pending" ? " (pending)" : ""}: ${formatPhi(transferMove.amount)} ${PHI_TEXT}${
@@ -828,8 +830,13 @@ function SigilTreeNode({
               )}
             </span>
           )}
-          {transferMove && inhaleLabel === "exhale" && transferStatus && (
-            <span className={`phi-status phi-status--${transferStatus}`} title={`Exhale ${transferStatus}`}>
+          {showOwnTransfer && transferMove && transferStatus === "pending" && (
+            <span className="phi-status phi-status--pending" title="Pending transfer">
+              Pending
+            </span>
+          )}
+          {showOwnTransfer && transferMove && inhaleLabel === "exhale" && transferStatus === "received" && (
+            <span className="phi-status phi-status--received" title="Exhale received">
               Exhale
             </span>
           )}
@@ -883,7 +890,7 @@ function SigilTreeNode({
               Pending {renderPhiAmount(pendingFromParent, { sign: "-" })}
             </span>
           )}
-          {transferStatus === "received" && transferMove && inhaleLabel === "exhale" && (
+          {showOwnTransfer && transferStatus === "received" && transferMove && inhaleLabel === "exhale" && (
             <span
               className="phi-pill phi-pill--drain"
               title={`Derived exhale: ${formatPhi(transferMove.amount)} ${PHI_TEXT}${
