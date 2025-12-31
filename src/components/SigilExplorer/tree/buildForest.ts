@@ -166,18 +166,20 @@ function buildContentIndex(reg: Registry): Map<string, ContentEntry> {
 
     let parentId: string | undefined;
 
-    if (e.id !== momentParentId) {
-      parentId = momentParentId;
-    } else {
-      const parentUrlRaw = readStringField(e.payload as unknown, "parentUrl");
-      if (parentUrlRaw) {
-        const parentUrl = canonicalizeUrl(parentUrlRaw);
-        const parentAnyId = urlToContentId.get(parentUrl);
-        const parentMomentParent =
-          momentParentByUrl.get(parentUrl) ?? (parentAnyId ? momentParentById.get(parentAnyId) : undefined);
+    const parentUrlRaw = readStringField(e.payload as unknown, "parentUrl");
+    if (parentUrlRaw) {
+      const parentUrl = canonicalizeUrl(parentUrlRaw);
+      const parentAnyId = urlToContentId.get(parentUrl);
+      const parentMomentParent =
+        momentParentByUrl.get(parentUrl) ?? (parentAnyId ? momentParentById.get(parentAnyId) : undefined);
 
-        if (parentMomentParent && parentMomentParent !== e.id) parentId = parentMomentParent;
+      if (parentMomentParent && parentMomentParent !== e.id) {
+        parentId = parentMomentParent;
       }
+    }
+
+    if (!parentId && e.id !== momentParentId) {
+      parentId = momentParentId;
     }
 
     out.set(e.id, {
