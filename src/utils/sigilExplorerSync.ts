@@ -78,22 +78,10 @@ function getLatestPulseFromRegistry(): number | undefined {
   return latest;
 }
 
-function getRegistryCount(): number {
-  let count = 0;
-  for (const [,] of memoryRegistry) count += 1;
-  return count;
-}
-
 function readRemotePulse(body: ApiSealResponse): number | undefined {
   const pulse = body?.pulse ?? body?.latestPulse ?? body?.latest_pulse;
   if (typeof pulse !== "number" || !Number.isFinite(pulse)) return undefined;
   return pulse;
-}
-
-function readRemoteTotal(body: ApiSealResponse): number | undefined {
-  const total = body?.total;
-  if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
-  return total;
 }
 
 export function startSigilExplorerSync(): () => void {
@@ -205,12 +193,11 @@ export function startSigilExplorerSync(): () => void {
       const hasNewerPulse =
         remotePulse != null && (localLatestPulse == null || remotePulse > localLatestPulse);
 
-      const remoteTotal = readRemoteTotal(body);
-      const localCount = remoteTotal != null ? getRegistryCount() : undefined;
-      const hasNewerTotal =
-        remoteTotal != null && (localCount == null || remoteTotal > localCount);
+      const hasDifferentPulse =
+        remotePulse != null &&
+        (localLatestPulse == null || Math.trunc(remotePulse) !== Math.trunc(localLatestPulse));
 
-      if (prevSeal && nextSeal && prevSeal === nextSeal && !hasNewerPulse && !hasNewerTotal) {
+      if (prevSeal && nextSeal && prevSeal === nextSeal && !hasNewerPulse && !hasDifferentPulse) {
         remoteSeal = nextSeal;
         return;
       }
