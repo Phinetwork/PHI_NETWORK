@@ -507,8 +507,8 @@ function buildDetailEntries(
           <PhiMark className="phi-detail__mark" /> Exhaled
         </span>
       ),
-      value: renderPhiAmount(transferMove.amount, { sign: "+" }),
-      valueText: `+${formatPhi(transferMove.amount)} ${PHI_TEXT}`,
+      value: renderPhiAmount(transferMove.amount, { sign: "-" }),
+      valueText: `-${formatPhi(transferMove.amount)} ${PHI_TEXT}`,
     });
     if (transferStatus === "received") {
       entries.push({
@@ -711,9 +711,9 @@ function SigilTreeNode({
       : undefined;
   const transferDisplay =
     transferMove && transferStatus === "received"
-      ? { direction: "send" as const, sign: "-", titleVerb: "inhaled" }
+      ? { direction: "receive" as const, sign: "+", titleVerb: "inhaled" }
       : transferMove
-        ? { direction: "receive" as const, sign: "+", titleVerb: "exhaled" }
+        ? { direction: "send" as const, sign: "-", titleVerb: "exhaled" }
         : null;
 
   return (
@@ -748,7 +748,7 @@ function SigilTreeNode({
           {transferMove && transferDisplay && (
             <span
               className={`phi-move phi-move--${transferDisplay.direction}`}
-              title={`Phi ${transferDisplay.titleVerb}: ${formatPhi(transferMove.amount)} ${PHI_TEXT}${
+              title={`Phi ${transferDisplay.titleVerb}${transferStatus === "pending" ? " (pending)" : ""}: ${formatPhi(transferMove.amount)} ${PHI_TEXT}${
                 transferMove.amountUsd !== undefined ? ` • $${formatUsd(transferMove.amountUsd)}` : ""
               }${transferMove.sentPulse !== undefined ? ` • sent pulse ${transferMove.sentPulse}` : ""}`}
             >
@@ -1791,7 +1791,8 @@ const SigilExplorer: React.FC = () => {
         childPendingTotal += childSummary.pendingFromParent;
       }
 
-      const netPhi = Math.max(0, baseValue - childReceivedTotal - childPendingTotal);
+      const pendingOutgoing = transferStatus === "pending" && transferMove?.direction === "send" ? transferMove.amount : 0;
+      const netPhi = Math.max(0, baseValue - childReceivedTotal - childPendingTotal - pendingOutgoing);
       const usdValue =
         transferStatus === "received" && transferMove?.amountUsd
           ? transferMove.amountUsd
@@ -1799,7 +1800,7 @@ const SigilExplorer: React.FC = () => {
             ? netPhi * usdPerPhi
             : null;
 
-      const pendingFromParent = transferStatus === "pending" && transferMove ? transferMove.amount : 0;
+      const pendingFromParent = pendingOutgoing;
       out.set(node.id, {
         basePhi,
         netPhi: Number.isFinite(netPhi) ? netPhi : null,
