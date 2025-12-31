@@ -37,8 +37,8 @@ type SigilSyncBag = {
 };
 
 const hasWindow = typeof window !== "undefined";
-const INHALE_INTERVAL_MS = 3236;
-const EXHALE_INTERVAL_MS = 2000;
+const INHALE_INTERVAL_MS = 5236;
+const EXHALE_INTERVAL_MS = 3236;
 
 function getSigilBag(): SigilSyncBag {
   if (!hasWindow) return {};
@@ -188,30 +188,20 @@ export function startSigilExplorerSync(): () => void {
       });
 
       if (!res) return;
-      if (res.status === 304) return;
-      if (!res.ok) return;
+      if (!res.ok && res.status !== 304) return;
 
       let nextSeal = "";
       let remotePulse: number | undefined;
-      try {
-        const body = (await res.json()) as ApiSealResponse;
-        nextSeal = typeof body?.seal === "string" ? body.seal : "";
-        remotePulse = readRemotePulse(body);
-      } catch {
-        return;
-      }
-
-      const localLatestPulse = getLatestPulseFromRegistry();
-      const localCount = getRegistryCount();
-      const remoteTotal = readRemoteTotal(body);
-      const hasNewerPulse =
-        remotePulse != null && (localLatestPulse == null || remotePulse > localLatestPulse);
-      const hasMoreRemote =
-        remoteTotal != null && (localCount == null || remoteTotal > localCount);
-
-      if (prevSeal && nextSeal && prevSeal === nextSeal && !hasNewerPulse && !hasMoreRemote) {
-        remoteSeal = nextSeal;
-        return;
+      let remoteTotal: number | undefined;
+      if (res.status !== 304) {
+        try {
+          const body = (await res.json()) as ApiSealResponse;
+          nextSeal = typeof body?.seal === "string" ? body.seal : "";
+          remotePulse = readRemotePulse(body);
+          remoteTotal = readRemoteTotal(body);
+        } catch {
+          return;
+        }
       }
 
       const importedRes = await pullAndImportRemoteUrls(ac.signal);
@@ -220,7 +210,17 @@ export function startSigilExplorerSync(): () => void {
       }
 
       const sealNow = remoteSeal;
-      const shouldFullSeed = reason === "open" || (sealNow && sealNow !== lastFullSeedSeal);
+      const localLatestPulse = getLatestPulseFromRegistry();
+      const localCount = getRegistryCount();
+      const hasNewerPulse =
+        remotePulse != null && (localLatestPulse == null || remotePulse > localLatestPulse);
+      const hasMoreRemote =
+        remoteTotal != null && (localCount == null || remoteTotal > localCount);
+      const shouldFullSeed =
+        reason === "open" ||
+        hasNewerPulse ||
+        hasMoreRemote ||
+        (sealNow && sealNow !== lastFullSeedSeal);
       if (shouldFullSeed) {
         seedInhaleFromRegistry();
         lastFullSeedSeal = sealNow;
