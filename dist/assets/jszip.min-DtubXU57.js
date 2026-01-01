@@ -1,0 +1,1 @@
+import{pt as e}from"./index-DmA5irH8.js";export default e();
