@@ -70,7 +70,7 @@ const LIVE_BASE_URL = "https://m.phi.network";
    PHI.Network backup base (same LAH-MAH-TOR API surface)
 ────────────────────────────────────────────────────────────────────── */
 
-const LIVE_BACKUP_URL = "https://kairos-sigil-merge-api.vercel.app/";
+const LIVE_BACKUP_URL = "https://m.kaiklok.com";
 
 /* ─────────────────────────────────────────────────────────────────────
  *  Types
