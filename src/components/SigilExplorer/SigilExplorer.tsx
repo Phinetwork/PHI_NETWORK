@@ -167,6 +167,22 @@ function nowMs(): number {
   return Date.now();
 }
 
+function detectLowPowerMode(): boolean {
+  if (!hasWindow) return false;
+  const nav = navigator as Navigator & {
+    deviceMemory?: number;
+    hardwareConcurrency?: number;
+    connection?: { saveData?: boolean; effectiveType?: string };
+    userAgentData?: { mobile?: boolean };
+  };
+  const saveData = nav.connection?.saveData === true;
+  const lowMemory = typeof nav.deviceMemory === "number" && nav.deviceMemory <= 4;
+  const lowCpu = typeof nav.hardwareConcurrency === "number" && nav.hardwareConcurrency <= 4;
+  const isMobile = nav.userAgentData?.mobile === true;
+  const isSmallViewport = typeof window.matchMedia === "function" && window.matchMedia("(max-width: 900px)").matches;
+  return Boolean(saveData || lowMemory || lowCpu || isMobile || isSmallViewport);
+}
+
 function yieldToMain(): Promise<void> {
   if (!hasWindow) return Promise.resolve();
   return new Promise((resolve) => {
@@ -1266,12 +1282,15 @@ const SigilExplorer: React.FC = () => {
   const [usernameClaims, setUsernameClaims] = useState<UsernameClaimRegistry>(() => getUsernameClaimRegistry());
   const [nowPulse, setNowPulse] = useState(() => getKaiPulseEternalInt(new Date()));
   const [activeView, setActiveView] = useState<"explorer" | "honeycomb">("explorer");
+  const [lowPowerMode] = useState(() => detectLowPowerMode());
   const [pulseViewer, setPulseViewer] = useState<{
     open: boolean;
     pulse: number | null;
     originUrl?: string;
     originHash?: string;
   }>({ open: false, pulse: null });
+  const [forest, setForest] = useState<SigilNode[]>(() => (lowPowerMode ? [] : buildForest(memoryRegistry)));
+  const [forestReady, setForestReady] = useState(() => !lowPowerMode);
 
   const unmounted = useRef(false);
   const prefetchedRef = useRef<Set<string>>(new Set());
@@ -2005,7 +2024,45 @@ const SigilExplorer: React.FC = () => {
     return () => window.removeEventListener(SIGIL_EXPLORER_OPEN_EVENT, onOpen);
   }, [requestImmediateSync]);
 
-  const forest = useMemo(() => buildForest(memoryRegistry), [registryRev]);
+  useEffect(() => {
+    if (!lowPowerMode) {
+      setForest(buildForest(memoryRegistry));
+      setForestReady(true);
+      return;
+    }
+
+    setForestReady(false);
+    let cancelled = false;
+
+    const build = () => {
+      if (cancelled) return;
+      const nextForest = buildForest(memoryRegistry);
+      startTransition(() => {
+        setForest(nextForest);
+        setForestReady(true);
+      });
+    };
+
+    const w = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+
+    let cancel: (() => void) | null = null;
+    if (typeof w.requestIdleCallback === "function") {
+      const id = w.requestIdleCallback(build, { timeout: 1400 });
+      cancel = () => w.cancelIdleCallback?.(id);
+    } else {
+      const id = window.setTimeout(build, 120);
+      cancel = () => window.clearTimeout(id);
+    }
+
+    return () => {
+      cancelled = true;
+      cancel?.();
+    };
+  }, [lowPowerMode, registryRev]);
+
   const transferRegistry = useMemo(() => readSigilTransferRegistry(), [transferRev]);
   const receiveLocks = useMemo(() => buildReceiveLockIndex(memoryRegistry), [registryRev, transferRev]);
 
@@ -2016,6 +2073,7 @@ const SigilExplorer: React.FC = () => {
   }, [registryRev]);
 
   const valueSnapshots = useMemo(() => {
+    if (lowPowerMode && !forestReady) return new Map<string, NodeValueSnapshot>();
     const out = new Map<string, NodeValueSnapshot>();
 
     const walk = (
@@ -2070,9 +2128,10 @@ const SigilExplorer: React.FC = () => {
 
     for (const root of forest) walk(root);
     return out;
-  }, [forest, nowPulse, receiveLocks, transferRegistry]);
+  }, [forest, forestReady, lowPowerMode, nowPulse, receiveLocks, transferRegistry]);
 
   const phiTotalsByPulse = useMemo((): ReadonlyMap<number, number> => {
+    if (lowPowerMode && !forestReady) return new Map<number, number>();
     const totals = new Map<number, number>();
     const seenByPulse = new Map<number, Set<string>>();
 
@@ -2098,9 +2157,10 @@ const SigilExplorer: React.FC = () => {
     }
 
     return totals;
-  }, [registryRev]);
+  }, [forestReady, lowPowerMode, registryRev]);
 
   const prefetchTargets = useMemo((): string[] => {
+    if (lowPowerMode) return [];
     const urls: string[] = [];
     for (const [rawUrl] of memoryRegistry) {
       const viewUrl = explorerOpenUrl(rawUrl);
@@ -2108,10 +2168,11 @@ const SigilExplorer: React.FC = () => {
       if (!urls.includes(canon)) urls.push(canon);
     }
     return urls;
-  }, [registryRev]);
+  }, [lowPowerMode, registryRev]);
 
   useEffect(() => {
     if (!hasWindow) return;
+    if (lowPowerMode) return;
     if (prefetchTargets.length === 0) return;
 
     const pending = prefetchTargets.filter((u) => !prefetchedRef.current.has(u));
@@ -2146,10 +2207,11 @@ const SigilExplorer: React.FC = () => {
       cancelled = true;
       cancel?.();
     };
-  }, [prefetchTargets]);
+  }, [lowPowerMode, prefetchTargets]);
 
   const probePrimaryCandidates = useCallback(async () => {
     if (!hasWindow) return;
+    if (lowPowerMode) return;
     if (scrollingRef.current) return;
     if (!isOnline()) return;
     if (nowMs() < interactUntilRef.current) return;
@@ -2181,10 +2243,11 @@ const SigilExplorer: React.FC = () => {
       if (res === "ok") setUrlHealth(u, 1);
       if (res === "bad") setUrlHealth(u, -1);
     }
-  }, [forest]);
+  }, [forest, lowPowerMode]);
 
   useEffect(() => {
     if (!hasWindow) return;
+    if (lowPowerMode) return;
 
     let cancelled = false;
 
@@ -2212,7 +2275,7 @@ const SigilExplorer: React.FC = () => {
       cancelled = true;
       cancel?.();
     };
-  }, [registryRev, probePrimaryCandidates]);
+  }, [lowPowerMode, registryRev, probePrimaryCandidates]);
 
   const handleAdd = useCallback(
     (url: string) => {
@@ -2338,12 +2401,18 @@ const SigilExplorer: React.FC = () => {
           <div className="explorer-inner">
             {forest.length === 0 ? (
               <div className="kx-empty">
-                <p>No sigil-glyphs in your keystream yet.</p>
-                <ol>
-                  <li>Import your keystream memories.</li>
-                  <li>Seal a moment — auto-registered here.</li>
-                  <li>Inhale any sigil-glyph or memory key above — lineage aligns instantly.</li>
-                </ol>
+                {totalKeys > 0 && lowPowerMode && !forestReady ? (
+                  <p>Loading your keystream lattice…</p>
+                ) : (
+                  <>
+                    <p>No sigil-glyphs in your keystream yet.</p>
+                    <ol>
+                      <li>Import your keystream memories.</li>
+                      <li>Seal a moment — auto-registered here.</li>
+                      <li>Inhale any sigil-glyph or memory key above — lineage aligns instantly.</li>
+                    </ol>
+                  </>
+                )}
               </div>
             ) : (
               <div className="forest" aria-label="Sigil forest">
