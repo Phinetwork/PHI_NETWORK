@@ -1,0 +1,41 @@
+/* ─────────────────────────────────────────────────────────────
+   Honeycomb + Explorer parity additions
+───────────────────────────────────────────────────────────── */
+
+.hcInhaleRow {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.hcInhaleInput {
+  width: min(560px, 100%);
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--hc-text);
+  padding: 0 12px;
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.hcInhaleInput::placeholder {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.hcImportBtn {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hcImportBtn input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}

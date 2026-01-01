@@ -1,0 +1,293 @@
+.phmBackdrop{
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.62);
+  backdrop-filter: blur(10px);
+  display: grid;
+  place-items: center;
+  padding: 12px;
+}
+
+.phmShell{
+  width: min(1400px, 98vw);
+  height: min(860px, 92vh);
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.10);
+  background:
+    radial-gradient(900px 650px at 20% 12%, rgba(191,252,255,0.10), transparent 60%),
+    radial-gradient(900px 650px at 80% 18%, rgba(182,155,255,0.10), transparent 62%),
+    radial-gradient(1200px 900px at 50% 90%, rgba(255,255,255,0.06), transparent 70%),
+    rgba(7,9,15,0.98);
+  box-shadow: 0 24px 70px rgba(0,0,0,0.65);
+}
+
+.phmHeader{
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 14px 12px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(to bottom, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+}
+
+.phmHeaderLeft{
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  min-width: 320px;
+}
+
+.phmTitle{
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+  color: rgba(255,255,255,0.92);
+}
+
+.phmSub{
+  margin-top: 2px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.62);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phmDot{ opacity: 0.55; }
+
+.phmPulse{
+  font-weight: 800;
+  color: rgba(255,255,255,0.78);
+}
+
+.phmOrigin{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: rgba(191,252,255,0.78);
+}
+
+.phmHeaderRight{
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.phmStats{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.phmPill{
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.78);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.phmPillChakra{
+  border-color: rgba(191,252,255,0.22);
+  background: rgba(191,252,255,0.06);
+}
+
+.phmActions{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.phmBtn{
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.86);
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.phmBtn:hover{
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.18);
+}
+
+.phmBtnClose{
+  border-color: rgba(191,252,255,0.18);
+  background: rgba(191,252,255,0.06);
+}
+
+.phmBody{
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  height: calc(100% - 64px);
+}
+
+@media (max-width: 980px){
+  .phmBody{
+    grid-template-columns: 1fr;
+  }
+  .phmInspector{
+    border-left: 0 !important;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    max-height: 320px;
+  }
+}
+
+.phmCombPanel{
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.phmCombToolbar{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.phmSearch{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 260px;
+  flex: 1;
+}
+
+.phmSearch input{
+  width: min(520px, 100%);
+  height: 34px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.26);
+  color: rgba(255,255,255,0.90);
+  padding: 0 12px;
+  outline: none;
+}
+
+.phmSearch input::placeholder{ color: rgba(255,255,255,0.42); }
+
+.phmMini{
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.86);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.phmSeg{
+  display: inline-flex;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+}
+
+.phmSeg button{
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: rgba(255,255,255,0.68);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.phmSeg button.on{
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.92);
+}
+
+.phmViewport{
+  flex: 1;
+  min-height: 0;
+}
+
+.phmInspector{
+  border-left: 1px solid rgba(255,255,255,0.06);
+  background: rgba(0,0,0,0.18);
+  overflow: auto;
+}
+
+.phmInspectorCard{
+  margin: 12px;
+}
+
+/* Beat ring */
+.phmBeatRing{
+  opacity: 0.92;
+}
+
+.phmBeatRingOuter{
+  fill: rgba(255,255,255,0.02);
+  stroke: rgba(255,255,255,0.10);
+  stroke-width: 1.2;
+}
+
+.phmBeatRingInner{
+  fill: rgba(0,0,0,0.22);
+  stroke: rgba(255,255,255,0.08);
+  stroke-width: 1.2;
+}
+
+.phmBeatTick{
+  stroke: rgba(255,255,255,0.18);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.phmBeatTick.isOn{
+  stroke: rgba(191,252,255,0.55);
+}
+
+.phmBeatTick.isActive{
+  stroke: rgba(182,155,255,0.70);
+  stroke-width: 3.0;
+}
+
+.phmHint{
+  left: 10px;
+  bottom: 10px;
+}
+/* BeatRing interactivity */
+.phmBeatTick{
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.phmBeatTick:hover{
+  stroke: rgba(255,255,255,0.55);
+}
+
+.phmBeatTick.isFiltered{
+  stroke: rgba(191,252,255,0.90);
+  stroke-width: 3.2;
+}
+
+/* Origin glow inside pulse */
+.sigilHex.isOrigin{
+  border-color: rgba(191,252,255,0.55);
+  box-shadow: 0 16px 44px rgba(0,0,0,0.65), inset 0 0 0 1px rgba(191,252,255,0.14);
+}
+
+/* Beat filter label */
+.phmBeatFilter{
+  color: rgba(182,155,255,0.78);
+  font-weight: 800;
+}
