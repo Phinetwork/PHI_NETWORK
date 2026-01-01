@@ -1529,7 +1529,7 @@ a:hover {
   text-align: left;
   cursor: pointer;
   font: inherit;
-  color: inherit;
+  color: var(--accent-cyan);
   appearance: none;
 }
 
