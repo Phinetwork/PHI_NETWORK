@@ -2,7 +2,6 @@ import http from "node:http";
 import { URL } from "node:url";
 
 import { generateSigilProof } from "../api/proof/sigil.js";
-import { handleLahmahtorProxy } from "../api/proxy/lahmahtorProxy.mjs"; // ✅ add
 
 const PORT = Number(process.env.API_PORT ?? 8787);
 
@@ -29,13 +28,7 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
-  // ✅ NEW: LAH-MAH-TOR same-server route (does not touch sigil proof logic)
-  if (url.pathname === "/api/lahmahtor" || url.pathname.startsWith("/api/lahmahtor/")) {
-    await handleLahmahtorProxy(req, res, url);
-    return;
-  }
 
-  
   if (url.pathname !== "/api/proof/sigil") {
     res.statusCode = 404;
     res.end("Not found");
