@@ -141,7 +141,6 @@ export async function buildEmbeddedBundle(args: {
   qrHref?: string | undefined; // kept for compatibility
   canonicalUrlFromContext: (hashHex: string, base: string) => string; // kept
   creatorResolved: { creator: string; creatorAlg: string; creatorId: string };
-  enableZkProof?: boolean;
 }): Promise<EmbeddedBundleResult> {
   const {
     canon,
@@ -155,7 +154,6 @@ export async function buildEmbeddedBundle(args: {
     valuationSource,
     mintSeal,
     frequencyHzCurrent,
-    enableZkProof = true,
     // qrHref, canonicalUrlFromContext, intentionSigil, klockSnapshot, kaiApiSnapshot — intentionally unused
     creatorResolved,
   } = args;
@@ -238,7 +236,7 @@ export async function buildEmbeddedBundle(args: {
   payloadObj = { ...payloadObj, zkPoseidonHash };
   proofHints = buildProofHints(zkPoseidonHash, proofHints);
 
-  if (enableZkProof && typeof window !== "undefined") {
+  if (typeof window !== "undefined") {
     const generated = await generateZkProofFromPoseidonHash({
       poseidonHash: zkPoseidonHash,
       secret: zkPoseidonSecret,

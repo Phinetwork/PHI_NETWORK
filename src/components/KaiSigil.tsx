@@ -170,7 +170,6 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
     onReady,
     onError,
     showZKBadge = true,
-    enableZkProof = true,
     qrHref,
     klock,
     embed,
@@ -472,7 +471,6 @@ const KaiSigil = forwardRef<KaiSigilHandle, KaiSigilProps>((props, ref) => {
           qrHref,
           canonicalUrlFromContext,
           creatorResolved: creatorMeta,
-          enableZkProof,
         });
 
         // Narrow bundle safely

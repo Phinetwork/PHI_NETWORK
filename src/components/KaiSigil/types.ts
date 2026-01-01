@@ -52,7 +52,6 @@ export interface KaiSigilProps {
   qrHref?: string;
 
   showZKBadge?: boolean;
-  enableZkProof?: boolean;
 
   /** Optional canonical share URL from sealed payload (single source of truth). */
   canonicalShareUrl?: string;
