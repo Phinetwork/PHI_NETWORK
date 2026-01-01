@@ -849,7 +849,7 @@ function SigilTreeNode({
               }
               style={mixExhaleColor as React.CSSProperties}
             >
-              Exhaled
+              Exhale
             </span>
           )}
           {inhaleLabel === "inhale" && (

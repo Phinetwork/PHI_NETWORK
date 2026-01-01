@@ -65,8 +65,6 @@ const SigilModal = lazy(
   React.ComponentType<{ initialPulse: number; onClose: () => void }>
 >;
 
-
-
 const HomePriceChartCard = lazy(
   () => import("./components/HomePriceChartCard"),
 ) as React.LazyExoticComponent<
@@ -283,7 +281,9 @@ function computeBeatStepDMY(m: KaiMoment): BeatStepDMY {
 
   const eps = 1e-9;
   const dayIndex =
-    dayIndexFromMoment !== null ? Math.floor(dayIndexFromMoment) : Math.floor((pulse + eps) / PULSES_PER_DAY);
+    dayIndexFromMoment !== null
+      ? Math.floor(dayIndexFromMoment)
+      : Math.floor((pulse + eps) / PULSES_PER_DAY);
 
   const daysPerYear = Number.isFinite(DAYS_PER_YEAR) ? DAYS_PER_YEAR : 336;
   const daysPerMonth = Number.isFinite(DAYS_PER_MONTH) ? DAYS_PER_MONTH : 42;
@@ -311,8 +311,6 @@ function formatBeatStepLabel(v: BeatStepDMY): string {
 function formatDMYLabel(v: BeatStepDMY): string {
   return `D${v.day}/M${v.month}/Y${v.year}`;
 }
-
-
 
 function isFixedSafeHost(el: HTMLElement): boolean {
   const cs = window.getComputedStyle(el);
@@ -929,7 +927,11 @@ function LiveKaiButton({
       const dmyLabel = formatDMYLabel(bsd);
 
       setSnap((prev) => {
-        if (prev.pulseStr === pulseStr && prev.beatStepLabel === beatStepLabel && prev.dmyLabel === dmyLabel) {
+        if (
+          prev.pulseStr === pulseStr &&
+          prev.beatStepLabel === beatStepLabel &&
+          prev.dmyLabel === dmyLabel
+        ) {
           return prev;
         }
         return {
@@ -1081,7 +1083,8 @@ export function AppChrome(): React.JSX.Element {
     const saveData = Boolean(navAny.connection?.saveData);
     const et = navAny.connection?.effectiveType || "";
     const slowNet = et === "slow-2g" || et === "2g";
-    const lowMemory = typeof navAny.deviceMemory === "number" && navAny.deviceMemory > 0 && navAny.deviceMemory <= 2;
+    const lowMemory =
+      typeof navAny.deviceMemory === "number" && navAny.deviceMemory > 0 && navAny.deviceMemory <= 2;
 
     if (saveData || slowNet || lowMemory) return;
 
@@ -1405,6 +1408,12 @@ export function AppChrome(): React.JSX.Element {
     return { alignSelf: "start", height: "auto" };
   }, [roomy]);
 
+  // ✅ NEW: header meta-chip actions (Verifier only)
+  const isVerifierRoute = location.pathname === "/";
+  const openMintPhikey = useCallback((): void => {
+    navigate("/mint");
+  }, [navigate]);
+
   return (
     <div
       className="app-shell"
@@ -1530,12 +1539,12 @@ export function AppChrome(): React.JSX.Element {
                   <button
                     type="button"
                     className="nav-item nav-item--button"
-                    aria-label="Attestation: Verify ΦKey"
+                    aria-label="Attestation: Proof Of Breath™"
                     aria-haspopup="dialog"
                     onClick={openVerify}
                   >
                     <div className="nav-item__label">Attestation</div>
-                    <div className="nav-item__desc">Verify ΦKey</div>
+                    <div className="nav-item__desc">Proof Of Breath™</div>
                   </button>
                 </div>
 
@@ -1549,8 +1558,59 @@ export function AppChrome(): React.JSX.Element {
                 <div className="panel-head">
                   <div className="panel-head__title">{pageTitle}</div>
                   <div className="panel-head__meta">
-                    <span className="meta-chip">Proof of Breath™</span>
-                    <span className="meta-chip">☤Kai-Signature™</span>
+                    {isVerifierRoute ? (
+                      <span
+                        className="meta-chip"
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Open Attestation (Proof of Breath)"
+                        title="Open Attestation"
+                        style={{ cursor: "pointer" }}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openVerify();
+                        }}
+                        onKeyDown={(e: React.KeyboardEvent<HTMLSpanElement>) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            openVerify();
+                          }
+                        }}
+                      >
+                        Proof of Breath™
+                      </span>
+                    ) : (
+                      <span className="meta-chip">Proof of Breath™</span>
+                    )}
+
+                    {isVerifierRoute ? (
+                      <span
+                        className="meta-chip"
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Open Mint ΦKey (Kai Signature)"
+                        title="Open Mint ΦKey"
+                        style={{ cursor: "pointer" }}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openMintPhikey();
+                        }}
+                        onKeyDown={(e: React.KeyboardEvent<HTMLSpanElement>) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            openMintPhikey();
+                          }
+                        }}
+                      >
+                        ☤Kai-Signature™
+                      </span>
+                    ) : (
+                      <span className="meta-chip">☤Kai-Signature™</span>
+                    )}
                   </div>
                 </div>
 
