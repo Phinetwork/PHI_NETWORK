@@ -2402,7 +2402,7 @@ const SigilExplorer: React.FC = () => {
             {forest.length === 0 ? (
               <div className="kx-empty">
                 {totalKeys > 0 && lowPowerMode && !forestReady ? (
-                  <p>Loading your keystream lattice…</p>
+                  <p>Aligning your keystream memory…</p>
                 ) : (
                   <>
                     <p>No sigil-glyphs in your keystream yet.</p>
