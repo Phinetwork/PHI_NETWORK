@@ -247,6 +247,18 @@ function chakraClass(chakraDay?: string): string {
   return "chakra-unknown";
 }
 
+function chakraShapeClass(chakraDay?: string): string | null {
+  const c = (chakraDay ?? "").toLowerCase();
+  if (c.includes("root")) return "shape-root";
+  if (c.includes("sacral")) return "shape-sacral";
+  if (c.includes("solar")) return "shape-solar";
+  if (c.includes("heart")) return "shape-heart";
+  if (c.includes("throat")) return "shape-throat";
+  if (c.includes("third") || c.includes("brow")) return "shape-third";
+  if (c.includes("crown")) return "shape-crown";
+  return null;
+}
+
 function shortHash(h: string, n = 10): string {
   return h.length <= n ? h : h.slice(0, n);
 }
@@ -526,6 +538,7 @@ const SigilHex = React.memo(function SigilHex(props: {
   const kks = deriveKksFromPulse(sigilPulse);
   const depth = (hashToUnit(node.hash) - 0.5) * 220 * PHI;
   const shapeIndex = Math.floor(hashToUnit(node.hash) * 6);
+  const shapeClass = chakraShapeClass(node.chakraDay) ?? `shape-${shapeIndex}`;
   const fallbackTint = node.chakraDay ? undefined : hashToRgb(node.hash);
 
   const ariaParts: string[] = [];
@@ -554,7 +567,7 @@ const SigilHex = React.memo(function SigilHex(props: {
       <div className="sigilHexInner">
         <div className="sigilHexGlyphFrame" aria-hidden="true">
           <div
-            className={`sigilHexGlyphSimple shape-${shapeIndex}`}
+            className={`sigilHexGlyphSimple ${shapeClass}`}
             style={fallbackTint ? ({ ["--hex-tint" as string]: fallbackTint } as React.CSSProperties) : undefined}
           />
         </div>
@@ -597,16 +610,31 @@ export default function SigilHoneycombExplorer({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [vpSize, setVpSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [zoom, setZoom] = useState<number>(0.6);
+  const [rotation, setRotation] = useState<{ x: number; y: number; z: number }>({ x: -18, y: 0, z: 0 });
 
   const [userInteracted, setUserInteracted] = useState<boolean>(false);
   const [userPan, setUserPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  const dragRef = useRef<{ active: boolean; x0: number; y0: number; panX0: number; panY0: number }>({
+  const dragRef = useRef<{
+    active: boolean;
+    mode: "pan" | "rotate";
+    x0: number;
+    y0: number;
+    panX0: number;
+    panY0: number;
+    rotX0: number;
+    rotY0: number;
+    rotZ0: number;
+  }>({
     active: false,
+    mode: "pan",
     x0: 0,
     y0: 0,
     panX0: 0,
     panY0: 0,
+    rotX0: 0,
+    rotY0: 0,
+    rotZ0: 0,
   });
 
   const remoteSealRef = useRef<string | null>(null);
@@ -1090,11 +1118,22 @@ export default function SigilHoneycombExplorer({
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 && e.button !== 2) return;
     if (e.target instanceof HTMLElement && e.target.closest(".sigilHex")) return;
 
     setUserInteracted(true);
-    dragRef.current = { active: true, x0: e.clientX, y0: e.clientY, panX0: pan.x, panY0: pan.y };
+    const rotateMode = e.button === 2 || e.shiftKey;
+    dragRef.current = {
+      active: true,
+      mode: rotateMode ? "rotate" : "pan",
+      x0: e.clientX,
+      y0: e.clientY,
+      panX0: pan.x,
+      panY0: pan.y,
+      rotX0: rotation.x,
+      rotY0: rotation.y,
+      rotZ0: rotation.z,
+    };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
@@ -1102,7 +1141,14 @@ export default function SigilHoneycombExplorer({
     if (!dragRef.current.active) return;
     const dx = e.clientX - dragRef.current.x0;
     const dy = e.clientY - dragRef.current.y0;
-    setUserPan({ x: dragRef.current.panX0 + dx, y: dragRef.current.panY0 + dy });
+    if (dragRef.current.mode === "rotate") {
+      const nextX = clamp(dragRef.current.rotX0 + dy * 0.35, -85, 85);
+      const nextY = dragRef.current.rotY0 + dx * 0.35;
+      const nextZ = e.altKey ? dragRef.current.rotZ0 + dx * 0.2 : dragRef.current.rotZ0;
+      setRotation({ x: nextX, y: nextY, z: nextZ });
+    } else {
+      setUserPan({ x: dragRef.current.panX0 + dx, y: dragRef.current.panY0 + dy });
+    }
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1190,13 +1236,14 @@ export default function SigilHoneycombExplorer({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
+          onContextMenu={(e) => e.preventDefault()}
         >
           <div
             className="combInner"
             style={{
               width: `${layout.width}px`,
               height: `${layout.height}px`,
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotateX(${rotation.x}deg) rotateY(${rotation.y}deg) rotateZ(${rotation.z}deg)`,
             }}
           >
             <svg className="combEdges" width={layout.width} height={layout.height} aria-hidden="true">
@@ -1225,7 +1272,9 @@ export default function SigilHoneycombExplorer({
             ))}
           </div>
 
-          <div className="combHint">Drag to pan • Wheel/pinch to zoom • Click a hex to inspect • Search filters the comb</div>
+          <div className="combHint">
+            Drag to pan • Shift/right-drag to rotate • Alt+drag to roll • Wheel/pinch to zoom • Click a hex to inspect
+          </div>
         </div>
 
         <aside className="combInspector" aria-label="Honeycomb inspector">
