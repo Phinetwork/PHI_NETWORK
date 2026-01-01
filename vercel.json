@@ -7,6 +7,7 @@
     { "source": "/success", "destination": "/" },
     { "source": "/s/:hash", "destination": "/" },
 
+    { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/_next/(.*)", "destination": "/_next/$1" },
     { "source": "/static/(.*)", "destination": "/static/$1" },
 
@@ -18,7 +19,7 @@
     { "source": "/sw.js", "destination": "/sw.js" },
     { "source": "/service-worker.js", "destination": "/service-worker.js" },
 
-    { "source": "/((?!api/).*)", "destination": "/" }
+    { "source": "/(.*)", "destination": "/" }
   ],
   "headers": [
     {

@@ -1,9 +1,9 @@
 // src/components/SigilExplorer/remotePull.ts
 "use client";
 
-import { apiFetchJsonWithFailover, API_URLS_PATH, resolveApiUrl } from "./apiClient";
+import { apiFetchJsonWithFailover, API_URLS_PATH } from "./apiClient";
 import { addUrl, persistRegistryToStorage, memoryRegistry } from "./registryStore";
-import { canonicalizeUrl, viewBaseOrigin } from "./url";
+import { canonicalizeUrl } from "./url";
 
 const URLS_PAGE_LIMIT = 5000;
 const URLS_MAX_PAGES_PER_SYNC = 24; // safety cap (5000*24 = 120k)
@@ -30,8 +30,7 @@ export async function pullAndImportRemoteUrls(
 
     const r = await apiFetchJsonWithFailover<ApiUrlsPageResponse>(
       (base) => {
-        const resolved = resolveApiUrl(base, API_URLS_PATH);
-        const url = new URL(resolved, viewBaseOrigin());
+        const url = new URL(API_URLS_PATH, base);
         url.searchParams.set("offset", String(offset));
         url.searchParams.set("limit", String(URLS_PAGE_LIMIT));
         return url.toString();

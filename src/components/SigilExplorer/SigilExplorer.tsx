@@ -60,7 +60,6 @@ import { loadUrlHealthFromStorage, probeUrl, setUrlHealth, urlHealth } from "./u
 import {
   apiFetchWithFailover,
   API_SEAL_PATH,
-  resolveApiUrl,
   type ApiSealResponse,
   loadApiBackupDeadUntil,
   loadApiBaseHint,
@@ -1776,7 +1775,7 @@ const SigilExplorer: React.FC = () => {
       try {
         const prevSeal = remoteSealRef.current;
 
-        const res = await apiFetchWithFailover((base) => resolveApiUrl(base, API_SEAL_PATH), {
+        const res = await apiFetchWithFailover((base) => new URL(API_SEAL_PATH, base).toString(), {
           method: "GET",
           cache: "no-store",
           signal: ac.signal,
