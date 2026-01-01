@@ -13,23 +13,48 @@ const hasWindow = typeof window !== "undefined";
 const canStorage = hasWindow && typeof window.localStorage !== "undefined";
 
 /* ─────────────────────────────────────────────────────────────────────
- *  LAH-MAH-TOR API (Primary + IKANN Failover, soft-fail backup)
- *  ─────────────────────────────────────────────────────────────────── */
-export const LIVE_BASE_URL = "https://m.phi.network";
-export const LIVE_BACKUP_URL = "https://memory.kaiklok.com";
+ *  LAH-MAH-TOR API (Primary + Backup)
+ *  CORS-PROOF MODE via SAME-ORIGIN PROXY:
+ *    /api/lahmahtor/*  ->  https://memory.kaiklok.com/*
+ *    (edge may fail over to https://m.kai.ac/*)
+ *
+ *  DIRECT MODE (optional, not recommended in browsers):
+ *    https://memory.kaiklok.com
+ *    https://m.kai.ac
+ * ─────────────────────────────────────────────────────────────────── */
 
-const API_BASE_PRIMARY = LIVE_BASE_URL;
-const API_BASE_FALLBACK = LIVE_BACKUP_URL;
+/** Proxy prefix mounted on phi.network (same-origin). */
+export const PROXY_PREFIX = "/api/lahmahtor";
 
-export const API_SEAL_PATH = "/sigils/seal";
-export const API_URLS_PATH = "/sigils/urls";
-export const API_INHALE_PATH = "/sigils/inhale";
+/**
+ * Default: false (CORS-proof). If you explicitly enable direct mode,
+ * set localStorage key:
+ *   kai:lahmahtorAllowCrossOrigin:v1 = "1"
+ */
+const ALLOW_CROSS_ORIGIN_DIRECT =
+  (hasWindow && localStorage.getItem("kai:lahmahtorAllowCrossOrigin:v1") === "1") || false;
+
+/**
+ * SAME-ORIGIN bases (preferred): keep "" so requests go to https://phi.network/...
+ * The edge proxy handles upstream selection & failover.
+ */
+export const LIVE_BASE_URL = "";
+export const LIVE_BACKUP_URL = "";
+
+/** DIRECT bases (only used if ALLOW_CROSS_ORIGIN_DIRECT is enabled). */
+export const DIRECT_PRIMARY_URL = "https://memory.kaiklok.com";
+export const DIRECT_BACKUP_URL = "https://m.kai.ac";
+
+/** Paths routed through proxy prefix (same-origin). */
+export const API_SEAL_PATH = `${PROXY_PREFIX}/sigils/seal`;
+export const API_URLS_PATH = `${PROXY_PREFIX}/sigils/urls`;
+export const API_INHALE_PATH = `${PROXY_PREFIX}/sigils/inhale`;
 
 const API_BASE_HINT_LS_KEY = "kai:lahmahtorBase:v1";
 
-/** Backup suppression: if m.kai fails, suppress it for a cooldown window (no issues, no spam). */
+/** Backup suppression: if backup fails, suppress it for a cooldown window (no spam). */
 const API_BACKUP_DEAD_UNTIL_LS_KEY = "kai:lahmahtorBackupDeadUntil:v1";
-const API_BACKUP_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes (tight, safe)
+const API_BACKUP_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
 
 let apiBackupDeadUntil = 0;
 
@@ -67,7 +92,8 @@ function clearBackupSuppression(): void {
 function markBackupDead(): void {
   apiBackupDeadUntil = nowMs() + API_BACKUP_COOLDOWN_MS;
   saveApiBackupDeadUntil();
-  // never “stick” to fallback if it’s failing
+
+  // never “stick” to backup if it’s failing
   if (apiBaseHint === API_BASE_FALLBACK) {
     apiBaseHint = API_BASE_PRIMARY;
     saveApiBaseHint();
@@ -75,17 +101,18 @@ function markBackupDead(): void {
 }
 
 /** Sticky base: whichever succeeded last is attempted first. */
-let apiBaseHint: string = API_BASE_PRIMARY;
+let apiBaseHint: string = ""; // assigned below
 
 export function loadApiBaseHint(): void {
   if (!canStorage) return;
   const raw = localStorage.getItem(API_BASE_HINT_LS_KEY);
+  if (!raw) return;
+
   if (raw === API_BASE_PRIMARY) {
     apiBaseHint = raw;
     return;
   }
   if (raw === API_BASE_FALLBACK) {
-    // if backup is currently suppressed, never load it as the preferred base
     apiBaseHint = isBackupSuppressed() ? API_BASE_PRIMARY : raw;
   }
 }
@@ -99,35 +126,45 @@ function saveApiBaseHint(): void {
   }
 }
 
-function apiBases(): string[] {
-  const wantFallbackFirst = apiBaseHint === API_BASE_FALLBACK && !isBackupSuppressed();
-  const list = wantFallbackFirst
-    ? [API_BASE_FALLBACK, API_BASE_PRIMARY]
-    : [API_BASE_PRIMARY, API_BASE_FALLBACK];
+/* ─────────────────────────────────────────────────────────────────────
+ *  Base selection
+ * ─────────────────────────────────────────────────────────────────── */
 
-  if (!hasWindow) {
-    // SSR: keep both, but still respect suppression in case it was set via storage read before render.
-    return isBackupSuppressed() ? list.filter((b) => b !== API_BASE_FALLBACK) : list;
+const API_BASE_PRIMARY = LIVE_BASE_URL; // "" (same-origin)
+const API_BASE_FALLBACK = LIVE_BACKUP_URL; // "" (same-origin)
+
+apiBaseHint = API_BASE_PRIMARY;
+
+function isCorsLikeNetworkError(err: unknown): boolean {
+  // Browsers commonly throw TypeError for CORS/network failures.
+  return err instanceof TypeError;
+}
+
+function apiBases(): string[] {
+  // Always include same-origin base ("") at least once.
+  const bases: string[] = [""];
+
+  // Direct mode: append cross-origin endpoints after same-origin proxy.
+  if (ALLOW_CROSS_ORIGIN_DIRECT) {
+    bases.push(DIRECT_PRIMARY_URL, DIRECT_BACKUP_URL);
   }
 
-  const isHttpsPage = window.location.protocol === "https:";
-  // Never try http fallback from an https page (browser will block + log loudly)
-  const protocolFiltered = isHttpsPage ? list.filter((b) => b.startsWith("https://")) : list;
-
-  // Soft-fail: suppress backup if marked dead
-  return isBackupSuppressed() ? protocolFiltered.filter((b) => b !== API_BASE_FALLBACK) : protocolFiltered;
+  // Dedup while preserving order.
+  return bases.filter((b, i, arr) => arr.indexOf(b) === i).filter((b) => (b === "" ? true : b.startsWith("https://")));
 }
 
 function shouldFailoverStatus(status: number): boolean {
-  // 0 = network/CORS/unknown from wrapper
+  // 0 = network/CORS/unknown
   if (status === 0) return true;
-  // common “route didn’t exist here but exists on the other base”
   if (status === 404) return true;
-  // transient / throttling / upstream
   if (status === 408 || status === 429) return true;
   if (status >= 500) return true;
   return false;
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ *  Fetch with failover
+ * ─────────────────────────────────────────────────────────────────── */
 
 export async function apiFetchWithFailover(
   makeUrl: (base: string) => string,
@@ -136,30 +173,38 @@ export async function apiFetchWithFailover(
   const bases = apiBases();
   let last: Response | null = null;
 
-  for (const base of bases) {
+  // If direct mode is on, we can prefer the last success; otherwise it's always "".
+  const wantFallbackFirst = apiBaseHint === API_BASE_FALLBACK && !isBackupSuppressed();
+  const ordered = wantFallbackFirst ? [...bases] : [...bases];
+
+  for (const base of ordered) {
+    // If backup is suppressed, skip it (only meaningful in direct mode)
+    if (base === DIRECT_BACKUP_URL && isBackupSuppressed()) continue;
+
     const url = makeUrl(base);
+
     try {
       const res = await fetch(url, init);
       last = res;
 
       // 304 is a valid success for seal checks.
       if (res.ok || res.status === 304) {
-        // if backup works again, clear suppression
-        if (base === API_BASE_FALLBACK) clearBackupSuppression();
+        if (base === DIRECT_BACKUP_URL) clearBackupSuppression();
 
         apiBaseHint = base;
         saveApiBaseHint();
         return res;
       }
 
-      // If backup is failing (404/5xx/etc), suppress it so it never “causes issues”.
-      if (base === API_BASE_FALLBACK && shouldFailoverStatus(res.status)) markBackupDead();
+      // If backup is failing (direct mode), suppress it.
+      if (base === DIRECT_BACKUP_URL && shouldFailoverStatus(res.status)) markBackupDead();
 
-      // If this status is “final”, stop here; otherwise try the other base.
+      // If status is “final”, stop; otherwise try next base.
       if (!shouldFailoverStatus(res.status)) return res;
-    } catch {
-      // network failure → try next base
-      if (base === API_BASE_FALLBACK) markBackupDead();
+    } catch (err) {
+      // network/CORS failure → try next base
+      if (base === DIRECT_BACKUP_URL) markBackupDead();
+      if (isCorsLikeNetworkError(err)) continue;
       continue;
     }
   }
@@ -180,4 +225,26 @@ export async function apiFetchJsonWithFailover<T>(
   } catch {
     return { ok: false, status: 0 };
   }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ *  Helpers used by callers
+ * ─────────────────────────────────────────────────────────────────── */
+
+export function buildSealUrl(base: string): string {
+  return `${base}${API_SEAL_PATH}`;
+}
+
+export function buildUrlsUrl(base: string): string {
+  return `${base}${API_URLS_PATH}`;
+}
+
+export function buildInhaleUrl(
+  base: string,
+  params: { include_state?: boolean; include_urls?: boolean } = {},
+): string {
+  const qs = new URLSearchParams();
+  qs.set("include_state", String(params.include_state ?? false));
+  qs.set("include_urls", String(params.include_urls ?? false));
+  return `${base}${API_INHALE_PATH}?${qs.toString()}`;
 }
