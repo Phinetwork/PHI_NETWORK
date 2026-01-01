@@ -812,7 +812,7 @@ export default function VerifyPage(): ReactElement {
   );
 
   return (
-    <div className="vapp" role="application" aria-label="☤Kai Sigil-Glyph Verifier">
+    <div className="vapp" role="application" aria-label="☤Kai Sigil-Glyph Attestation">
       {/* Floating toast (always visible; auto-dismiss) */}
       {notice ? (
         <button type="button" className="vtoast vtoast-floating" onClick={() => setNotice("")} aria-label="Dismiss notice" title="Dismiss">
@@ -824,7 +824,7 @@ export default function VerifyPage(): ReactElement {
       <header className="vhead">
         <div className="vhead-left">
           <div className="vbrand">
-            <div className="vtitle">☤Kai Sigil-Glyph Verifier</div>
+            <div className="vtitle">☤Kai Sigil-Glyph Attestation</div>
             <div className="vsub">Sovereign proof of human origin — ☤Kai-Signature → Φ-Key.</div>
           </div>
 
@@ -896,7 +896,7 @@ export default function VerifyPage(): ReactElement {
                       <button
                         type="button"
                         className="vdrop"
-                        aria-label="Inhale sealed ΦKey SVG"
+                        aria-label="Inhale sealed ΦKey (SVG)"
                         title="Inhale sealed ΦKey (.svg)"
                         onClick={() => fileRef.current?.click()}
                       >
@@ -935,7 +935,7 @@ export default function VerifyPage(): ReactElement {
 
                     <div className="vconsole" aria-label="ΦKey preview">
                       <pre className="vpre">
-                        <code className="mono">{svgPreview || "inhale a sealed ΦKey SVG to begin…"}</code>
+                        <code className="mono">{svgPreview || "inhale a sealed ΦKey (.SVG) to begin…"}</code>
                       </pre>
                       <div className="vconsole-foot">
                         <div className="vchip" title="Sovereign verification rail">
