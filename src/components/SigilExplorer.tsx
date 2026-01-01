@@ -64,13 +64,13 @@ import "./SigilExplorer.css";
 /* ─────────────────────────────────────────────────────────────────────
    Live base (API + canonical sync target)
 ────────────────────────────────────────────────────────────────────── */
-const LIVE_BASE_URL = "https://align.kaiklok.com";
+const LIVE_BASE_URL = "https://m.phi.network";
 
 /* ─────────────────────────────────────────────────────────────────────
    PHI.Network backup base (same LAH-MAH-TOR API surface)
 ────────────────────────────────────────────────────────────────────── */
 
-const LIVE_BACKUP_URL = "https://m.phi.network";
+const LIVE_BACKUP_URL = "https://kairos-sigil-merge-api.vercel.app/";
 
 /* ─────────────────────────────────────────────────────────────────────
  *  Types

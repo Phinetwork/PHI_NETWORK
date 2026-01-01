@@ -15,8 +15,8 @@ const canStorage = hasWindow && typeof window.localStorage !== "undefined";
 /* ─────────────────────────────────────────────────────────────────────
  *  LAH-MAH-TOR API (Primary + IKANN Failover, soft-fail backup)
  *  ─────────────────────────────────────────────────────────────────── */
-export const LIVE_BASE_URL = "https://align.kaiklok.com";
-export const LIVE_BACKUP_URL = "https://m.phi.network";
+export const LIVE_BASE_URL = "https://m.phi.network";
+export const LIVE_BACKUP_URL = "https://kairos-sigil-merge-api.vercel.app/";
 
 const API_BASE_PRIMARY = LIVE_BASE_URL;
 const API_BASE_FALLBACK = LIVE_BACKUP_URL;
