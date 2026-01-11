@@ -1,6 +1,20 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+/**
+ * PulseHoneycombModal.tsx — v41.3.1
+ * - Clean live chart (no 128/512/2k/max controls)
+ * - Φ ⇄ USD value toggle
+ * - Rich hover/lock tooltip rendered via portal (never clipped)
+ * - Proof strip (PhiKey + KaiSig + key hash) in header-right
+ * - Slim bottom bar actions
+ *
+ * FIX (41.3.1):
+ * - Removed setState-in-effect cascade by deriving unitMode from selection
+ *   with a user override (unitOverride). No more:
+ *     useEffect(() => setUnitMode(...), [selectedIsDerived])
+ */
+
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import "./SigilHoneycomb.css";
 import "./PulseHoneycombModal.css";
@@ -8,20 +22,20 @@ import "./PulseHoneycombModal.css";
 import { memoryRegistry } from "./registryStore";
 import { computeIntrinsicUnsigned, type SigilMetadataLite } from "../../utils/valuation";
 import { DEFAULT_ISSUANCE_POLICY, quotePhiForUsd } from "../../utils/phi-issuance";
-import LiveChart from "../valuation/chart/LiveChart";
-import { COLORS } from "../valuation/constants";
 import { bootstrapSeries } from "../valuation/series";
 import KaiSigil from "../KaiSigil";
 import type { ChakraDay } from "../KaiSigil/types";
-import { N_DAY_MICRO, latticeFromMicroPulses, normalizePercentIntoStep } from "../../utils/kai_pulse";
+import { N_DAY_MICRO, latticeFromMicroPulses, momentFromPulse, normalizePercentIntoStep } from "../../utils/kai_pulse";
+import { getKaiPulseEternalInt } from "../../SovereignSolar";
 import {
   canonicalizeUrl,
-  browserViewUrl,
   explorerOpenUrl,
   contentKindForUrl,
   scoreUrlForView,
   parseHashFromUrl,
 } from "./url";
+
+const PHM_MODAL_VERSION = "41.3.1";
 
 type EdgeMode = "none" | "parent" | "parent+children" | "all";
 
@@ -72,7 +86,16 @@ export type PulseHoneycombModalProps = {
   pulse: number | null;
   originUrl?: string;
   originHash?: string;
-  registryRev?: number; // used only as a refresh signal (no state derived from it)
+  anchor?: { x: number; y: number };
+  registryRev?: number; // refresh signal only
+  onClose: () => void;
+};
+
+type PulseHoneycombInnerProps = {
+  pulse: number | null;
+  originUrl?: string;
+  originHash?: string;
+  registryRev?: number;
   onClose: () => void;
 };
 
@@ -80,8 +103,133 @@ const HAS_WINDOW = typeof window !== "undefined";
 
 const SIGIL_SELECT_CHANNEL_NAME = "sigil:explorer:select:bc:v1";
 const SIGIL_SELECT_LS_KEY = "sigil:explorer:selectedHash:v1";
+
 const ONE_PULSE_MICRO = 1_000_000n;
 
+/* ─────────────────────────────────────────────────────────────
+   Idle scheduling (no any)
+───────────────────────────────────────────────────────────── */
+type IdleCompat = {
+  requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+function getIdleCompat(): IdleCompat {
+  return globalThis as unknown as IdleCompat;
+}
+
+function scheduleIdle(cb: () => void): { cancel: () => void } {
+  const g = getIdleCompat();
+
+  if (typeof g.requestIdleCallback === "function") {
+    const id = g.requestIdleCallback(() => cb(), { timeout: 200 });
+    return {
+      cancel: () => {
+        if (typeof g.cancelIdleCallback === "function") g.cancelIdleCallback(id);
+      },
+    };
+  }
+
+  const id = window.setTimeout(cb, 32);
+  return { cancel: () => clearTimeout(id) };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Small utilities
+───────────────────────────────────────────────────────────── */
+function ignore(): void {
+  // best-effort
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function readStr(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+function readLowerStr(v: unknown): string | undefined {
+  const s = readStr(v);
+  return s ? s.toLowerCase() : undefined;
+}
+
+function readFiniteNumber(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function safeLocalStorageSet(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    ignore();
+  }
+}
+
+function broadcastSelectedHash(hash: string): void {
+  if (!HAS_WINDOW) return;
+
+  safeLocalStorageSet(SIGIL_SELECT_LS_KEY, hash);
+
+  try {
+    const ch = "BroadcastChannel" in window ? new BroadcastChannel(SIGIL_SELECT_CHANNEL_NAME) : null;
+    ch?.postMessage({ type: "sigil:select", hash });
+    ch?.close();
+  } catch {
+    ignore();
+  }
+}
+
+function shortHash(h: string, n = 10): string {
+  return h.length <= n ? h : h.slice(0, n);
+}
+
+function formatUsd(value?: number): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+}
+
+function formatPhiNumber(value?: number): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const fixed = value.toFixed(6);
+  return fixed.replace(/0+$/u, "").replace(/\.$/u, "");
+}
+
+function normalizeChakraDay(value?: string): ChakraDay {
+  const v = (value ?? "").toLowerCase();
+  if (v.includes("root")) return "Root";
+  if (v.includes("sacral")) return "Sacral";
+  if (v.includes("solar")) return "Solar Plexus";
+  if (v.includes("heart")) return "Heart";
+  if (v.includes("throat")) return "Throat";
+  if (v.includes("third") || v.includes("brow")) return "Third Eye";
+  if (v.includes("crown")) return "Crown";
+  return "Root";
+}
+
+async function copyText(text: string): Promise<void> {
+  if (!HAS_WINDOW) return;
+  if (!text) return;
+  if (!navigator.clipboard) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    ignore();
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   KKS wrapping
+───────────────────────────────────────────────────────────── */
 const modE = (a: bigint, m: bigint) => {
   if (m === 0n) return 0n;
   const r = a % m;
@@ -103,6 +251,7 @@ const SIGIL_WRAP_PULSE: bigint = (() => {
   const g = gcdBI(N_DAY_MICRO, ONE_PULSE_MICRO);
   return g === 0n ? 0n : N_DAY_MICRO / g;
 })();
+
 const SIGIL_RENDER_CACHE = new Set<string>();
 const PHI = (1 + Math.sqrt(5)) / 2;
 
@@ -136,184 +285,26 @@ function useDeferredSigilRender(key: string): boolean {
 
   useEffect(() => {
     if (cached) return;
+
     let cancelled = false;
-    const schedule = typeof window !== "undefined" && "requestIdleCallback" in window
-      ? (cb: () => void) => window.requestIdleCallback(cb, { timeout: 200 })
-      : (cb: () => void) => window.setTimeout(cb, 32);
-    const handle = schedule(() => {
+    const task = scheduleIdle(() => {
       if (cancelled) return;
       SIGIL_RENDER_CACHE.add(key);
       forceRender((v) => v + 1);
     });
+
     return () => {
       cancelled = true;
-      if (typeof window !== "undefined" && "cancelIdleCallback" in window) {
-        window.cancelIdleCallback(handle as number);
-      } else {
-        clearTimeout(handle as number);
-      }
+      task.cancel();
     };
   }, [cached, key]);
 
   return cached;
 }
 
-const HEX_DIRS: Coord[] = [
-  { q: 1, r: 0 },
-  { q: 1, r: -1 },
-  { q: 0, r: -1 },
-  { q: -1, r: 0 },
-  { q: -1, r: 1 },
-  { q: 0, r: 1 },
-];
-
-function ignore(): void {
-  // Intentionally ignored (best-effort behavior).
-}
-
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function readStr(v: unknown): string | undefined {
-  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
-}
-
-function readLowerStr(v: unknown): string | undefined {
-  const s = readStr(v);
-  return s ? s.toLowerCase() : undefined;
-}
-
-function readFiniteNumber(v: unknown): number | undefined {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return undefined;
-}
-
-function toTransferDirection(v: unknown): "send" | "receive" | undefined {
-  const s = readStr(v);
-  if (s === "send" || s === "receive") return s;
-  return undefined;
-}
-
-function normalizeChakraDay(value?: string): ChakraDay {
-  const v = (value ?? "").toLowerCase();
-  if (v.includes("root")) return "Root";
-  if (v.includes("sacral")) return "Sacral";
-  if (v.includes("solar")) return "Solar Plexus";
-  if (v.includes("heart")) return "Heart";
-  if (v.includes("throat")) return "Throat";
-  if (v.includes("third") || v.includes("brow")) return "Third Eye";
-  if (v.includes("crown")) return "Crown";
-  return "Root";
-}
-
-function safeLocalStorageSet(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    ignore();
-  }
-}
-
-function broadcastSelectedHash(hash: string): void {
-  if (!HAS_WINDOW) return;
-
-  safeLocalStorageSet(SIGIL_SELECT_LS_KEY, hash);
-
-  try {
-    const ch = "BroadcastChannel" in window ? new BroadcastChannel(SIGIL_SELECT_CHANNEL_NAME) : null;
-    ch?.postMessage({ type: "sigil:select", hash });
-    ch?.close();
-  } catch {
-    ignore();
-  }
-}
-
-function chakraClass(chakraDay?: string): string {
-  const c = (chakraDay ?? "").toLowerCase();
-  if (c.includes("root")) return "chakra-root";
-  if (c.includes("sacral")) return "chakra-sacral";
-  if (c.includes("solar")) return "chakra-solar";
-  if (c.includes("heart")) return "chakra-heart";
-  if (c.includes("throat")) return "chakra-throat";
-  if (c.includes("third") || c.includes("brow")) return "chakra-third";
-  if (c.includes("crown")) return "chakra-crown";
-  return "chakra-unknown";
-}
-
-function formatPhi(v?: string): string {
-  if (!v) return "—";
-  return v.startsWith("-") ? v : `+${v}`;
-}
-
-function formatUsd(value?: number): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
-}
-
-function formatPhiNumber(value?: number): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  const fixed = value.toFixed(6);
-  return fixed.replace(/0+$/u, "").replace(/\.$/u, "");
-}
-
-function buildValuationMeta(payload: Record<string, unknown>): SigilMetadataLite {
-  return {
-    pulse: readFiniteNumber(payload.pulse),
-    beat: readFiniteNumber(payload.beat),
-    stepIndex: readFiniteNumber(payload.stepIndex),
-    chakraDay: readStr(payload.chakraDay),
-    userPhiKey: readStr(payload.userPhiKey),
-    kaiSignature: readLowerStr(payload.kaiSignature),
-    transfers: Array.isArray(payload.transfers) ? (payload.transfers as SigilMetadataLite["transfers"]) : undefined,
-    segments: Array.isArray(payload.segments) ? (payload.segments as SigilMetadataLite["segments"]) : undefined,
-    ip: isRecord(payload.ip) ? (payload.ip as SigilMetadataLite["ip"]) : undefined,
-  };
-}
-
-function computeLivePhi(payload: Record<string, unknown>, nowPulse: number | null): number | null {
-  if (nowPulse == null || !Number.isFinite(nowPulse)) return null;
-  try {
-    const meta = buildValuationMeta(payload);
-    const { unsigned } = computeIntrinsicUnsigned(meta, nowPulse);
-    return Number.isFinite(unsigned.valuePhi) ? unsigned.valuePhi : null;
-  } catch {
-    return null;
-  }
-}
-
-function computeUsdPerPhi(payload: Record<string, unknown>, nowPulse: number | null): number | null {
-  if (nowPulse == null || !Number.isFinite(nowPulse)) return null;
-  try {
-    const meta = buildValuationMeta(payload);
-    const quote = quotePhiForUsd(
-      {
-        meta,
-        nowPulse,
-        usd: 100,
-        currentStreakDays: 0,
-        lifetimeUsdSoFar: 0,
-      },
-      DEFAULT_ISSUANCE_POLICY,
-    );
-    return Number.isFinite(quote.usdPerPhi) ? quote.usdPerPhi : null;
-  } catch {
-    return null;
-  }
-}
-
-function shortHash(h: string, n = 10): string {
-  return h.length <= n ? h : h.slice(0, n);
-}
-
+/* ─────────────────────────────────────────────────────────────
+   URL/hash helpers
+───────────────────────────────────────────────────────────── */
 function extractHashFromUrlLoose(url: string): string | null {
   const h = parseHashFromUrl(url);
   if (typeof h === "string" && h.length) return h.toLowerCase();
@@ -340,6 +331,12 @@ function extractOriginHash(payload: Record<string, unknown>): string | undefined
     const oh = extractHashFromUrlLoose(originUrl);
     if (oh) return oh;
   }
+  return undefined;
+}
+
+function toTransferDirection(v: unknown): "send" | "receive" | undefined {
+  const s = readStr(v);
+  if (s === "send" || s === "receive") return s;
   return undefined;
 }
 
@@ -381,37 +378,9 @@ function pickBestUrlForNode(urls: string[]): string {
   return explorerOpenUrl(best);
 }
 
-function hexSpiralCoords(n: number): Coord[] {
-  if (n <= 0) return [];
-  const coords: Coord[] = [{ q: 0, r: 0 }];
-  let radius = 1;
-
-  while (coords.length < n) {
-    let q = HEX_DIRS[4].q * radius;
-    let r = HEX_DIRS[4].r * radius;
-
-    for (let d = 0; d < 6 && coords.length < n; d++) {
-      const dq = HEX_DIRS[d].q;
-      const dr = HEX_DIRS[d].r;
-      for (let step = 0; step < radius && coords.length < n; step++) {
-        coords.push({ q, r });
-        q += dq;
-        r += dr;
-      }
-    }
-
-    radius += 1;
-  }
-
-  return coords;
-}
-
-function axialToPixelPointy(c: Coord, radiusPx: number): Pt {
-  const x = radiusPx * Math.sqrt(3) * (c.q + c.r / 2);
-  const y = radiusPx * (3 / 2) * c.r;
-  return { x, y };
-}
-
+/* ─────────────────────────────────────────────────────────────
+   Build nodes for pulse
+───────────────────────────────────────────────────────────── */
 function buildNodesForPulse(pulse: number): HoneyNode[] {
   const byHash = new Map<string, HoneyNode>();
 
@@ -495,7 +464,6 @@ function buildNodesForPulse(pulse: number): HoneyNode[] {
     });
   }
 
-  // degrees within pulse
   const childrenCount = new Map<string, number>();
   for (const n of byHash.values()) {
     if (!n.parentHash) continue;
@@ -523,8 +491,666 @@ function buildNodesForPulse(pulse: number): HoneyNode[] {
   });
 }
 
-type ChartBundle = ReturnType<typeof bootstrapSeries>;
+/* ─────────────────────────────────────────────────────────────
+   Hex layout
+───────────────────────────────────────────────────────────── */
+const HEX_DIRS: Coord[] = [
+  { q: 1, r: 0 },
+  { q: 1, r: -1 },
+  { q: 0, r: -1 },
+  { q: -1, r: 0 },
+  { q: -1, r: 1 },
+  { q: 0, r: 1 },
+];
 
+function hexSpiralCoords(n: number): Coord[] {
+  if (n <= 0) return [];
+  const coords: Coord[] = [{ q: 0, r: 0 }];
+  let radius = 1;
+
+  while (coords.length < n) {
+    let q = HEX_DIRS[4].q * radius;
+    let r = HEX_DIRS[4].r * radius;
+
+    for (let d = 0; d < 6 && coords.length < n; d++) {
+      const dq = HEX_DIRS[d].q;
+      const dr = HEX_DIRS[d].r;
+      for (let step = 0; step < radius && coords.length < n; step++) {
+        coords.push({ q, r });
+        q += dq;
+        r += dr;
+      }
+    }
+
+    radius += 1;
+  }
+
+  return coords;
+}
+
+function axialToPixelPointy(c: Coord, radiusPx: number): Pt {
+  const x = radiusPx * Math.sqrt(3) * (c.q + c.r / 2);
+  const y = radiusPx * (3 / 2) * c.r;
+  return { x, y };
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Valuation helpers
+───────────────────────────────────────────────────────────── */
+function buildValuationMeta(payload: Record<string, unknown>): SigilMetadataLite {
+  return {
+    pulse: readFiniteNumber(payload.pulse),
+    beat: readFiniteNumber(payload.beat),
+    stepIndex: readFiniteNumber(payload.stepIndex),
+    chakraDay: readStr(payload.chakraDay),
+    userPhiKey: readStr(payload.userPhiKey),
+    kaiSignature: readLowerStr(payload.kaiSignature),
+    transfers: Array.isArray(payload.transfers) ? (payload.transfers as SigilMetadataLite["transfers"]) : undefined,
+    segments: Array.isArray(payload.segments) ? (payload.segments as SigilMetadataLite["segments"]) : undefined,
+    ip: isRecord(payload.ip) ? (payload.ip as SigilMetadataLite["ip"]) : undefined,
+  };
+}
+
+function computeLivePhi(payload: Record<string, unknown>, nowPulse: number | null): number | null {
+  if (nowPulse == null || !Number.isFinite(nowPulse)) return null;
+  try {
+    const meta = buildValuationMeta(payload);
+    const { unsigned } = computeIntrinsicUnsigned(meta, nowPulse);
+    return Number.isFinite(unsigned.valuePhi) ? unsigned.valuePhi : null;
+  } catch {
+    return null;
+  }
+}
+
+function computeUsdPerPhi(payload: Record<string, unknown>, nowPulse: number | null): number | null {
+  if (nowPulse == null || !Number.isFinite(nowPulse)) return null;
+  try {
+    const meta = buildValuationMeta(payload);
+    const quote = quotePhiForUsd(
+      { meta, nowPulse, usd: 100, currentStreakDays: 0, lifetimeUsdSoFar: 0 },
+      DEFAULT_ISSUANCE_POLICY,
+    );
+    return Number.isFinite(quote.usdPerPhi) ? quote.usdPerPhi : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Media query hook
+───────────────────────────────────────────────────────────── */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState<boolean>(() => {
+    if (!HAS_WINDOW) return false;
+    try {
+      return window.matchMedia(query).matches;
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (!HAS_WINDOW) return;
+
+    let mql: MediaQueryList;
+    try {
+      mql = window.matchMedia(query);
+    } catch {
+      return;
+    }
+
+    const onChange = (e: MediaQueryListEvent) => setMatches(e.matches);
+
+    if ("addEventListener" in mql) {
+      mql.addEventListener("change", onChange);
+      return () => mql.removeEventListener("change", onChange);
+    }
+
+    const legacy = mql as unknown as {
+      addListener?: (cb: (e: MediaQueryListEvent) => void) => void;
+      removeListener?: (cb: (e: MediaQueryListEvent) => void) => void;
+    };
+
+    legacy.addListener?.(onChange);
+    return () => legacy.removeListener?.(onChange);
+  }, [query]);
+
+  return matches;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Anchored popover positioning (no React state)
+───────────────────────────────────────────────────────────── */
+function useAnchoredPopoverPosition(args: {
+  enabled: boolean;
+  shellRef: React.RefObject<HTMLDivElement | null>;
+  anchor?: { x: number; y: number };
+}) {
+  const { enabled, shellRef, anchor } = args;
+
+  useLayoutEffect(() => {
+    if (!HAS_WINDOW) return;
+    if (!enabled) return;
+
+    const shell = shellRef.current;
+    if (!shell) return;
+    if (!anchor) return;
+
+    const margin = 12;
+    const gap = 10;
+
+    const place = () => {
+      const el = shellRef.current;
+      if (!el) return;
+
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const rect = el.getBoundingClientRect();
+
+      const belowY = anchor.y + gap;
+      const aboveY = anchor.y - rect.height - gap;
+
+      const spaceBelow = vh - (belowY + rect.height) - margin;
+      const spaceAbove = aboveY - margin;
+
+      const useAbove = spaceBelow < 0 && spaceAbove > spaceBelow;
+
+      const desiredX = anchor.x - rect.width * 0.5;
+      const desiredY = useAbove ? aboveY : belowY;
+
+      const x = clamp(desiredX, margin, Math.max(margin, vw - rect.width - margin));
+      const y = clamp(desiredY, margin, Math.max(margin, vh - rect.height - margin));
+
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.transformOrigin = `${Math.max(0, anchor.x - x)}px ${Math.max(0, anchor.y - y)}px`;
+      el.setAttribute("data-popover-flip", useAbove ? "above" : "below");
+    };
+
+    let raf = window.requestAnimationFrame(place);
+
+    const onRecalc = () => {
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(place);
+    };
+
+    window.addEventListener("resize", onRecalc, { passive: true });
+    window.addEventListener("scroll", onRecalc, { passive: true, capture: true });
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => onRecalc());
+      ro.observe(shell);
+    }
+
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", onRecalc as EventListener);
+      window.removeEventListener("scroll", onRecalc as EventListener, true);
+      ro?.disconnect();
+    };
+  }, [enabled, shellRef, anchor?.x, anchor?.y]);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Chakra classes
+───────────────────────────────────────────────────────────── */
+function chakraClass(chakraDay?: string): string {
+  const c = (chakraDay ?? "").toLowerCase();
+  if (c.includes("root")) return "chakra-root";
+  if (c.includes("sacral")) return "chakra-sacral";
+  if (c.includes("solar")) return "chakra-solar";
+  if (c.includes("heart")) return "chakra-heart";
+  if (c.includes("throat")) return "chakra-throat";
+  if (c.includes("third") || c.includes("brow")) return "chakra-third";
+  if (c.includes("crown")) return "chakra-crown";
+  return "chakra-unknown";
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Interactive Chart + rich tooltip (portal, never clipped)
+───────────────────────────────────────────────────────────── */
+type UnitMode = "phi" | "usd";
+
+type RichPoint = {
+  i: number;
+  phi: number;
+  usdPerPhi?: number;
+  pulse?: number;
+};
+
+type TipPayload = {
+  i: number;
+  pulse?: number;
+
+  valueMode: number;
+  valuePhi: number;
+  valueUsd: number;
+
+  usdPerPhiPoint?: number;
+
+  hi: number;
+  lo: number;
+
+  dFromStart: number;
+  dPctFromStart: number;
+
+  points: number;
+};
+
+function coerceRichPoints(lineData: ReadonlyArray<unknown>): RichPoint[] {
+  const out: RichPoint[] = [];
+  for (let idx = 0; idx < lineData.length; idx += 1) {
+    const it = lineData[idx];
+    if (!isRecord(it)) continue;
+
+    const i = readFiniteNumber(it.i) ?? idx;
+
+    const phi =
+      readFiniteNumber(it.value) ??
+      readFiniteNumber(it.phi) ??
+      readFiniteNumber(it.v) ??
+      readFiniteNumber(it.y);
+
+    if (phi == null) continue;
+
+    const usdPerPhi =
+      readFiniteNumber(it.usdPerPhi) ??
+      readFiniteNumber(it.usd_per_phi) ??
+      readFiniteNumber(it.rate) ??
+      readFiniteNumber(it.usdRate);
+
+    const pulse = readFiniteNumber(it.pulse) ?? readFiniteNumber(it.x);
+
+    out.push({ i, phi, usdPerPhi: usdPerPhi ?? undefined, pulse: pulse ?? undefined });
+  }
+  return out;
+}
+
+function valueInMode(p: RichPoint, mode: UnitMode, usdPerPhiFallback: number | null): number {
+  if (mode === "phi") return p.phi;
+  const r = p.usdPerPhi ?? usdPerPhiFallback;
+  if (r == null || !Number.isFinite(r)) return NaN;
+  return p.phi * r;
+}
+
+function buildSvgPathFromValues(values: number[], w: number, h: number, pad: number) {
+  const xAtZero = (_k: number) => {
+    void _k;
+    return 0;
+  };
+  const yAtZero = (_v: number) => {
+    void _v;
+    return 0;
+  };
+
+  if (values.length < 2) {
+    return {
+      d: "",
+      minV: 0,
+      maxV: 0,
+      xAt: xAtZero,
+      yAt: yAtZero,
+    };
+  }
+
+  let minV = Infinity;
+  let maxV = -Infinity;
+
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    minV = Math.min(minV, v);
+    maxV = Math.max(maxV, v);
+  }
+
+  if (!Number.isFinite(minV) || !Number.isFinite(maxV)) {
+    return {
+      d: "",
+      minV: 0,
+      maxV: 0,
+      xAt: xAtZero,
+      yAt: yAtZero,
+    };
+  }
+
+  const span = Math.max(1e-9, maxV - minV);
+
+  const n = values.length;
+  const x0 = pad;
+  const x1 = w - pad;
+  const y0 = pad;
+  const y1 = h - pad;
+
+  const xAt = (k: number) => x0 + (k / Math.max(1, n - 1)) * (x1 - x0);
+  const yAt = (v: number) => y1 - ((v - minV) / span) * (y1 - y0);
+
+  let d = "";
+  for (let k = 0; k < n; k += 1) {
+    const v = values[k]!;
+    const x = xAt(k);
+    const y = yAt(v);
+    d += k === 0 ? `M ${x.toFixed(2)} ${y.toFixed(2)}` : ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }
+
+  return { d, minV, maxV, xAt, yAt };
+}
+
+function formatValue(mode: UnitMode, v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  if (mode === "phi") return `${formatPhiNumber(v)} Φ`;
+  return `$${formatUsd(v)}`;
+}
+
+function makeTipPayload(args: {
+  mode: UnitMode;
+  points: RichPoint[];
+  values: number[];
+  idx: number;
+  usdPerPhiFallback: number | null;
+  hi: number;
+  lo: number;
+}): TipPayload | null {
+  const { points, values, idx, usdPerPhiFallback, hi, lo } = args;
+  if (idx < 0 || idx >= values.length) return null;
+
+  const pointAt = points[idx];
+  const valAt = values[idx];
+
+  const firstVal = values[0];
+  const vPhi = pointAt?.phi ?? NaN;
+  const rate = pointAt?.usdPerPhi ?? usdPerPhiFallback;
+  const vUsd = rate != null && Number.isFinite(rate) ? vPhi * rate : NaN;
+
+  const fv = firstVal;
+  const dv = Number.isFinite(fv) ? (valAt - fv) : NaN;
+  const dp = Number.isFinite(fv) && fv !== 0 ? (dv / Math.abs(fv)) * 100 : NaN;
+
+  return {
+    i: pointAt?.i ?? idx,
+    pulse: pointAt?.pulse,
+    valueMode: valAt,
+    valuePhi: vPhi,
+    valueUsd: vUsd,
+    usdPerPhiPoint: rate ?? undefined,
+    hi,
+    lo,
+    dFromStart: dv,
+    dPctFromStart: dp,
+    points: values.length,
+  };
+}
+
+/**
+ * Tooltip portal: fixed-position overlay so it NEVER gets clipped by .phmChart overflow.
+ */
+function ChartTipPortal(props: {
+  open: boolean;
+  locked: boolean;
+  x: number;
+  y: number;
+  mode: UnitMode;
+  tip: TipPayload;
+}) {
+  const { open, locked, x, y, mode, tip } = props;
+  const portalEl = HAS_WINDOW ? document.body : null;
+  if (!open || portalEl == null) return null;
+
+  return createPortal(
+    <div className={`phmTipPortal ${locked ? "isLocked" : ""}`} style={{ left: `${x}px`, top: `${y}px` }} aria-hidden="true">
+      <div className="phmTipInner">
+        <div className="phmTipTop">
+          <div className="phmTipTitle">{mode === "phi" ? "Asset Value (Φ)" : "Asset Value (USD)"}</div>
+          <div className="phmTipIndex">
+            {tip.pulse != null ? `Pulse ${Math.trunc(tip.pulse).toLocaleString()}` : `Index ${tip.i}`}
+          </div>
+        </div>
+
+        <div className="phmTipMain">
+          <div className="phmTipBig">{formatValue(mode, tip.valueMode)}</div>
+          <div className="phmTipSubRow">
+            <span className="phmTipSub">{Number.isFinite(tip.valuePhi) ? `${formatPhiNumber(tip.valuePhi)} Φ` : "—"}</span>
+            <span className="phmTipDot">•</span>
+            <span className="phmTipSub">{Number.isFinite(tip.valueUsd) ? `$${formatUsd(tip.valueUsd)}` : "—"}</span>
+          </div>
+        </div>
+
+        <div className="phmTipGrid">
+          <div className="phmTipK">Δ</div>
+          <div className="phmTipV">
+            {Number.isFinite(tip.dFromStart) ? formatValue(mode, tip.dFromStart) : "—"}
+            {Number.isFinite(tip.dPctFromStart) ? (
+              <span className="phmTipMini">
+                {" "}
+                ({tip.dPctFromStart >= 0 ? "+" : ""}
+                {tip.dPctFromStart.toFixed(2)}%)
+              </span>
+            ) : null}
+          </div>
+
+          <div className="phmTipK">High</div>
+          <div className="phmTipV">{formatValue(mode, tip.hi)}</div>
+
+          <div className="phmTipK">Low</div>
+          <div className="phmTipV">{formatValue(mode, tip.lo)}</div>
+
+          <div className="phmTipK">USD/Φ</div>
+          <div className="phmTipV">
+            {tip.usdPerPhiPoint != null && Number.isFinite(tip.usdPerPhiPoint) ? `$${formatUsd(tip.usdPerPhiPoint)}` : "—"}
+          </div>
+
+          <div className="phmTipK">Points</div>
+          <div className="phmTipV">{tip.points}</div>
+        </div>
+
+        <div className="phmTipHint">{locked ? "tap again to unlock" : "tap to lock"}</div>
+      </div>
+    </div>,
+    portalEl,
+  );
+}
+
+function InteractiveValueChart(props: {
+  lineData: ReadonlyArray<unknown>;
+  mode: UnitMode;
+  usdPerPhiFallback: number | null;
+  livePhi: number | null;
+  liveUsd: number | null;
+  usdPerPhiNow: number | null;
+}) {
+  const { lineData, mode, usdPerPhiFallback, livePhi, liveUsd, usdPerPhiNow } = props;
+
+  const hostRef = useRef<HTMLDivElement | null>(null);
+
+  const points = useMemo(() => coerceRichPoints(lineData), [lineData]);
+
+  const values = useMemo(() => points.map((p) => valueInMode(p, mode, usdPerPhiFallback)), [points, mode, usdPerPhiFallback]);
+
+  const W = 420;
+  const H = 86;
+  const PAD = 10;
+
+  const path = useMemo(() => buildSvgPathFromValues(values, W, H, PAD), [values]);
+
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
+
+  // tooltip portal position in viewport coords
+  const [tipXY, setTipXY] = useState<{ x: number; y: number } | null>(null);
+
+  const n = values.length;
+  const idxSafe = hoverIdx != null ? clamp(hoverIdx, 0, Math.max(0, n - 1)) : null;
+  const hasTip = idxSafe != null && idxSafe >= 0 && idxSafe < n;
+
+  const firstVal = n > 0 ? values[0]! : null;
+  const lastVal = n > 0 ? values[n - 1]! : null;
+
+  const deltaPct = useMemo(() => {
+    if (!Number.isFinite(firstVal ?? NaN) || !Number.isFinite(lastVal ?? NaN)) return null;
+    const base = Math.abs(firstVal as number);
+    if (base <= 0) return null;
+    return (((lastVal as number) - (firstVal as number)) / base) * 100;
+  }, [firstVal, lastVal]);
+
+  const tipPayload = useMemo(() => {
+    if (!hasTip || idxSafe == null) return null;
+    return makeTipPayload({
+      mode,
+      points,
+      values,
+      idx: idxSafe,
+      usdPerPhiFallback,
+      hi: path.maxV,
+      lo: path.minV,
+    });
+  }, [hasTip, idxSafe, mode, points, values, usdPerPhiFallback, path.maxV, path.minV]);
+
+  const setFromClientX = (clientX: number) => {
+    const el = hostRef.current;
+    if (!el) return;
+    if (!n) return;
+
+    const rect = el.getBoundingClientRect();
+    const xLocal = clamp(clientX - rect.left, 0, rect.width);
+    const t = rect.width > 0 ? xLocal / rect.width : 0;
+    const idx = Math.round(t * Math.max(0, n - 1));
+    setHoverIdx(idx);
+
+    // anchor tooltip above point, but compute in viewport coords
+    const vx = path.xAt(idx);
+    const vy = path.yAt(values[idx] ?? 0);
+
+    const px = rect.width > 0 ? (vx / W) * rect.width : 0;
+    const py = rect.height > 0 ? (vy / H) * rect.height : 0;
+
+    // viewport position
+    const tipX = rect.left + px;
+    const tipY = rect.top + py;
+
+    setTipXY({ x: tipX, y: tipY });
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!n) return;
+    if (locked) return;
+    setFromClientX(e.clientX);
+  };
+
+  const onPointerEnter = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!n) return;
+    if (locked) return;
+    setFromClientX(e.clientX);
+  };
+
+  const onPointerLeave = () => {
+    if (locked) return;
+    setHoverIdx(null);
+    setTipXY(null);
+  };
+
+  const onClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!n) return;
+    if (locked) {
+      setLocked(false);
+      setHoverIdx(null);
+      setTipXY(null);
+      return;
+    }
+    setLocked(true);
+    setFromClientX(e.clientX);
+  };
+
+  const livePrimary = mode === "phi" ? (livePhi ?? null) : (liveUsd ?? null);
+  const liveLabel = formatValue(mode, Number.isFinite(livePrimary ?? NaN) ? (livePrimary as number) : NaN);
+
+  const usdPerPhiLabel = usdPerPhiNow != null ? `$${formatUsd(usdPerPhiNow)} / Φ` : "—";
+
+  return (
+    <>
+      <div
+        ref={hostRef}
+        className={`phmChart phmChart--lite phmChart--interactive ${locked ? "isLocked" : ""}`}
+        role="group"
+        aria-label="Live value chart"
+        onPointerMove={onPointerMove}
+        onPointerEnter={onPointerEnter}
+        onPointerLeave={onPointerLeave}
+        onClick={onClick}
+      >
+        <div className="phmChartTopRow" aria-hidden="true">
+          <span className="phmChartBadge">
+            <span className="phmLiveDot" />
+            LIVE
+          </span>
+          <span className="phmTicker">{liveLabel}</span>
+          <span className="phmChartHint">{locked ? "tap again to unlock" : "tap to lock"}</span>
+        </div>
+
+        <svg className="phmChartSvg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="phmLine" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor="rgba(191,252,255,0.85)" />
+              <stop offset="60%" stopColor="rgba(183,163,255,0.75)" />
+              <stop offset="100%" stopColor="rgba(191,252,255,0.55)" />
+            </linearGradient>
+            <linearGradient id="phmFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(191,252,255,0.18)" />
+              <stop offset="70%" stopColor="rgba(191,252,255,0.04)" />
+              <stop offset="100%" stopColor="rgba(0,0,0,0)" />
+            </linearGradient>
+            <filter id="phmGlow" x="-30%" y="-50%" width="160%" height="200%">
+              <feGaussianBlur stdDeviation="2.3" result="b" />
+              <feColorMatrix
+                in="b"
+                type="matrix"
+                values="
+                  1 0 0 0 0
+                  0 1 0 0 0
+                  0 0 1 0 0
+                  0 0 0 .55 0"
+              />
+            </filter>
+          </defs>
+
+          {path.d ? (
+            <>
+              <path d={`${path.d} L ${W - PAD} ${H - PAD} L ${PAD} ${H - PAD} Z`} fill="url(#phmFill)" opacity="0.9" />
+              <path d={path.d} stroke="url(#phmLine)" strokeWidth="3" fill="none" filter="url(#phmGlow)" opacity="0.8" />
+              <path d={path.d} stroke="url(#phmLine)" strokeWidth="1.6" fill="none" opacity="0.95" />
+              {n > 0 ? (
+                <circle className="phmChartDot" cx={path.xAt(n - 1)} cy={path.yAt(values[n - 1] ?? 0)} r="3.2" />
+              ) : null}
+            </>
+          ) : (
+            <text x="50%" y="52%" textAnchor="middle" fill="rgba(255,255,255,0.62)" fontSize="12">
+              No data
+            </text>
+          )}
+        </svg>
+
+        <div className="phmChartBottomRow" aria-hidden="true">
+          <span className="phmChartSub">{usdPerPhiLabel}</span>
+          <span className="phmChartChg">
+            {deltaPct != null && Number.isFinite(deltaPct) ? `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(2)}%` : ""}
+          </span>
+        </div>
+      </div>
+
+      {/* Tooltip is portal-rendered so it can NEVER be under/clipped by chart */}
+      <ChartTipPortal
+        open={!!(tipPayload && tipXY)}
+        locked={locked}
+        x={tipXY?.x ?? 0}
+        y={tipXY?.y ?? 0}
+        mode={mode}
+        tip={tipPayload as TipPayload}
+      />
+    </>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Hex button (selectable)
+───────────────────────────────────────────────────────────── */
 const SigilHex = React.memo(function SigilHex(props: {
   node: HoneyNode;
   x: number;
@@ -535,8 +1161,7 @@ const SigilHex = React.memo(function SigilHex(props: {
 }) {
   const { node, x, y, selected, isOrigin, onClick } = props;
 
-  const pulseValue =
-    typeof node.pulse === "number" && Number.isFinite(node.pulse) ? node.pulse : 0;
+  const pulseValue = typeof node.pulse === "number" && Number.isFinite(node.pulse) ? node.pulse : 0;
   const sigilPulse = wrapPulseForSigil(pulseValue);
   const kks = deriveKksFromPulse(sigilPulse);
   const chakraDay = normalizeChakraDay(node.chakraDay);
@@ -546,9 +1171,7 @@ const SigilHex = React.memo(function SigilHex(props: {
 
   const ariaParts: string[] = [];
   if (typeof node.pulse === "number") ariaParts.push(`pulse ${node.pulse}`);
-  if (Number.isFinite(kks.beat) && Number.isFinite(kks.stepIndex)) {
-    ariaParts.push(`beat ${kks.beat} step ${kks.stepIndex}`);
-  }
+  if (Number.isFinite(kks.beat) && Number.isFinite(kks.stepIndex)) ariaParts.push(`beat ${kks.beat} step ${kks.stepIndex}`);
   if (node.chakraDay) ariaParts.push(node.chakraDay);
   ariaParts.push(shortHash(node.hash, 12));
   const aria = ariaParts.join(" — ");
@@ -585,16 +1208,19 @@ const SigilHex = React.memo(function SigilHex(props: {
             <div className="sigilHexGlyphPlaceholder" />
           )}
         </div>
+
         <div className="sigilHexTop">
           <span className="sigilHexPulse">{typeof node.pulse === "number" ? node.pulse : "—"}</span>
           <span className="sigilHexHash">{shortHash(node.hash)}</span>
         </div>
+
         <div className="sigilHexMid">
           <span className="sigilHexBeat">
             {kks.beat}:{kks.stepIndex}
           </span>
-          <span className="sigilHexDelta">{formatPhi(node.phiDelta)}</span>
+          <span className="sigilHexDelta">{readStr(node.phiDelta) ?? "—"}</span>
         </div>
+
         <div className="sigilHexBot">
           <span className="sigilHexChakra">{node.chakraDay || "—"}</span>
         </div>
@@ -604,16 +1230,92 @@ const SigilHex = React.memo(function SigilHex(props: {
 });
 
 /* ─────────────────────────────────────────────────────────────
-   Wrapper Modal (no setState-in-effect resets)
-   Inner view remounts on pulse/origin change via key.
+   Modal wrapper
 ───────────────────────────────────────────────────────────── */
-
 export default function PulseHoneycombModal(props: PulseHoneycombModalProps) {
-  const { open, pulse, originUrl, originHash, onClose } = props;
+  const { open, pulse, originUrl, originHash, anchor, registryRev, onClose } = props;
 
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const lockedScrollYRef = useRef<number>(0);
 
-  // ESC close + focus close button (no setState)
+  const isCompactSheet = useMediaQuery("(max-width: 720px), (max-height: 720px)");
+  const anchored = !!anchor && !isCompactSheet;
+
+  useAnchoredPopoverPosition({
+    enabled: open && anchored,
+    shellRef,
+    anchor,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    if (!isCompactSheet) return;
+    if (!HAS_WINDOW) return;
+
+    const prev = {
+      bodyPosition: document.body.style.position,
+      bodyTop: document.body.style.top,
+      bodyLeft: document.body.style.left,
+      bodyRight: document.body.style.right,
+      bodyWidth: document.body.style.width,
+      bodyHeight: document.body.style.height,
+      bodyOverflow: document.body.style.overflow,
+      bodyTouchAction: document.body.style.touchAction,
+      htmlOverflow: document.documentElement.style.overflow,
+      htmlHeight: document.documentElement.style.height,
+      htmlOverscroll: document.documentElement.style.getPropertyValue("overscroll-behavior"),
+      bodyOverscroll: document.body.style.getPropertyValue("overscroll-behavior"),
+      htmlTouchAction: document.documentElement.style.touchAction,
+    };
+
+    lockedScrollYRef.current = window.scrollY || window.pageYOffset || 0;
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${lockedScrollYRef.current}px`;
+    document.body.style.left = "0";
+    document.body.style.right = "0";
+    document.body.style.width = "100%";
+    document.body.style.height = "100%";
+    document.body.style.overflow = "hidden";
+
+    document.documentElement.style.overflow = "hidden";
+    document.documentElement.style.height = "100%";
+    document.documentElement.style.setProperty("overscroll-behavior", "none");
+    document.body.style.setProperty("overscroll-behavior", "none");
+    document.documentElement.style.touchAction = "none";
+    document.body.style.touchAction = "none";
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!e.cancelable) return;
+      const target = e.target as Node | null;
+      if (target && shellRef.current?.contains(target)) return;
+      e.preventDefault();
+    };
+
+    document.addEventListener("touchmove", onTouchMove, { passive: false });
+
+    return () => {
+      document.removeEventListener("touchmove", onTouchMove);
+
+      document.body.style.position = prev.bodyPosition;
+      document.body.style.top = prev.bodyTop;
+      document.body.style.left = prev.bodyLeft;
+      document.body.style.right = prev.bodyRight;
+      document.body.style.width = prev.bodyWidth;
+      document.body.style.height = prev.bodyHeight;
+      document.body.style.overflow = prev.bodyOverflow;
+      document.body.style.touchAction = prev.bodyTouchAction;
+
+      document.documentElement.style.overflow = prev.htmlOverflow;
+      document.documentElement.style.height = prev.htmlHeight;
+      document.documentElement.style.setProperty("overscroll-behavior", prev.htmlOverscroll);
+      document.body.style.setProperty("overscroll-behavior", prev.bodyOverscroll);
+      document.documentElement.style.touchAction = prev.htmlTouchAction;
+
+      window.scrollTo(0, lockedScrollYRef.current);
+    };
+  }, [open, isCompactSheet]);
+
+  // ESC close + focus close
   useEffect(() => {
     if (!HAS_WINDOW) return;
     if (!open) return;
@@ -628,12 +1330,10 @@ export default function PulseHoneycombModal(props: PulseHoneycombModalProps) {
       btn?.focus();
     }, 0);
 
-    return () => {
-      window.removeEventListener("keydown", onKey);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // body scroll lock (external system)
+  // body scroll lock
   useEffect(() => {
     if (!HAS_WINDOW) return;
     if (!open) return;
@@ -657,36 +1357,66 @@ export default function PulseHoneycombModal(props: PulseHoneycombModalProps) {
 
   const key = `${pulse ?? "none"}:${originHash ?? ""}:${originUrl ?? ""}`;
 
+  const backdropClass = [
+    "phmBackdrop",
+    anchored ? "phmBackdrop--anchored" : "",
+    isCompactSheet ? "phmBackdrop--sheet" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const shellClass = [
+    "phmShell",
+    anchored ? "phmShell--anchored" : "",
+    isCompactSheet ? "phmShell--sheet" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return createPortal(
-    <div
-      className="phmBackdrop"
-      role="presentation"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div ref={shellRef} className="phmShell" role="dialog" aria-modal="true">
-        <PulseHoneycombInner key={key} {...props} />
+    <div className={backdropClass} role="presentation">
+      {!anchored ? (
+        <div style={{ position: "fixed", inset: 0, pointerEvents: "auto" }} onMouseDown={() => onClose()} aria-hidden="true" />
+      ) : null}
+
+      <div
+        ref={shellRef}
+        className={shellClass}
+        role="dialog"
+        aria-modal={!anchored}
+        aria-label="Pulse Atlas"
+        data-anchored={anchored ? "1" : "0"}
+        data-phm-version={PHM_MODAL_VERSION}
+      >
+        <PulseHoneycombInner
+          key={key}
+          pulse={pulse}
+          originUrl={originUrl}
+          originHash={originHash}
+          registryRev={registryRev}
+          onClose={onClose}
+        />
       </div>
     </div>,
     portalEl,
   );
 }
 
-function PulseHoneycombInner({
-  open,
-  pulse,
-  originUrl,
-  originHash,
-  registryRev,
-  onClose,
-}: PulseHoneycombModalProps) {
-  // Defaults (no reset effects). Remount via key handles reset.
+/* ─────────────────────────────────────────────────────────────
+   Inner view
+   - Adds proof strip (PhiKey / KaiSig / Hash) in header-right
+   - Tooltip fixed via portal (not clipped)
+───────────────────────────────────────────────────────────── */
+function PulseHoneycombInner({ pulse, originUrl, originHash, registryRev, onClose }: PulseHoneycombInnerProps) {
   const [edgeMode] = useState<EdgeMode>("parent+children");
   const [selectedOverride, setSelectedOverride] = useState<string | null>(null);
 
-  const viewportRef = useRef<HTMLDivElement | null>(null);
+  // FIX: unitMode is derived (derived nodes default to USD) + optional user override
+  const [unitOverride, setUnitOverride] = useState<UnitMode | null>(null);
 
+  const [nowPulse, setNowPulse] = useState(() => getKaiPulseEternalInt(new Date()));
+
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const [vpSize, setVpSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [zoom, setZoom] = useState<number>(1);
   const [userInteracted, setUserInteracted] = useState<boolean>(false);
@@ -700,7 +1430,14 @@ function PulseHoneycombInner({
     panY0: 0,
   });
 
-  // ResizeObserver (subscription callback => OK)
+  useEffect(() => {
+    if (!HAS_WINDOW) return;
+    const tick = () => setNowPulse(getKaiPulseEternalInt(new Date()));
+    const id = window.setInterval(tick, 6000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // ResizeObserver
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
@@ -716,9 +1453,50 @@ function PulseHoneycombInner({
     return () => ro.disconnect();
   }, []);
 
+  // Touch guard: prevent pull-to-refresh while interacting with the viewport.
+  useEffect(() => {
+    if (!HAS_WINDOW) return;
+    const el = viewportRef.current;
+    if (!el) return;
+
+    let lastY = 0;
+    let lastX = 0;
+
+    const onTouchStart = (ev: TouchEvent) => {
+      if (ev.touches.length !== 1) return;
+      lastY = ev.touches[0]?.clientY ?? 0;
+      lastX = ev.touches[0]?.clientX ?? 0;
+    };
+
+    const onTouchMove = (ev: TouchEvent) => {
+      if (!ev.cancelable) return;
+      if (ev.touches.length !== 1) return;
+
+      const y = ev.touches[0]?.clientY ?? 0;
+      const x = ev.touches[0]?.clientX ?? 0;
+      const dy = y - lastY;
+      const dx = x - lastX;
+
+      lastY = y;
+      lastX = x;
+
+      if (Math.abs(dy) <= Math.abs(dx)) return;
+      if (dy > 0 && window.scrollY <= 0) {
+        ev.preventDefault();
+      }
+    };
+
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+  }, []);
+
   const activePulse = typeof pulse === "number" ? pulse : null;
   void registryRev;
-  void open;
 
   const nodesRaw = useMemo(() => {
     if (activePulse == null) return [];
@@ -746,21 +1524,17 @@ function PulseHoneycombInner({
     return m;
   }, [nodesRaw]);
 
-  const filtered = nodesRaw;
-
-  const selectionPool = filtered.length > 0 ? filtered : nodesRaw;
-
   const computedInitialHash = useMemo(() => {
-    if (selectionPool.length === 0) return null;
+    if (nodesRaw.length === 0) return null;
     if (originCandidate && byHash.has(originCandidate)) return originCandidate;
 
     let best: HoneyNode | null = null;
-    for (const n of selectionPool) {
+    for (const n of nodesRaw) {
       if (!best) best = n;
       else if (n.degree > best.degree) best = n;
     }
-    return best?.hash ?? selectionPool[0].hash;
-  }, [selectionPool, originCandidate, byHash]);
+    return best?.hash ?? nodesRaw[0]!.hash;
+  }, [nodesRaw, originCandidate, byHash]);
 
   const selectedHash = useMemo(() => {
     const ov = selectedOverride ? selectedOverride.toLowerCase() : null;
@@ -769,12 +1543,47 @@ function PulseHoneycombInner({
   }, [selectedOverride, byHash, computedInitialHash]);
 
   const selected = useMemo(() => (selectedHash ? byHash.get(selectedHash) ?? null : null), [selectedHash, byHash]);
-  const selectedPulse =
-    selected && typeof selected.pulse === "number" && Number.isFinite(selected.pulse)
-      ? wrapPulseForSigil(selected.pulse)
-      : null;
-  const selectedKks = selectedPulse != null ? deriveKksFromPulse(selectedPulse) : null;
-  const activeBeat = selectedKks ? Math.floor(selectedKks.beat) : null;
+  const selectedIsDerived = !!selected?.originHash;
+
+  // FIX: Derived default + optional user override (no effect / no cascade)
+  const unitMode: UnitMode = unitOverride ?? (selectedIsDerived ? "usd" : "phi");
+
+  const activeMoment = useMemo(() => (activePulse != null ? momentFromPulse(activePulse) : null), [activePulse]);
+  const activePulseLabel = activePulse != null ? activePulse.toLocaleString() : "—";
+  const activeChakraDay = activeMoment?.chakraDay ?? "Root";
+  const beatLabel = activeMoment?.beat ?? "—";
+  const stepLabel = activeMoment?.stepIndex ?? "—";
+
+  // Prefer identity from selected node; fallback to any payload in this pulse that has it.
+  const headerIdentity = useMemo(() => {
+    const selPhi = selected?.userPhiKey ? selected.userPhiKey : undefined;
+    const selSig = selected?.kaiSignature ? selected.kaiSignature : undefined;
+    if (selPhi || selSig) {
+      return { userPhiKey: selPhi, kaiSignature: selSig, hash: selected?.hash ?? null };
+    }
+
+    if (activePulse == null) return { userPhiKey: undefined, kaiSignature: undefined, hash: null };
+
+    let best: { userPhiKey?: string; kaiSignature?: string } | null = null;
+    let bestScore = -1;
+
+    for (const [, payloadLoose] of memoryRegistry) {
+      if (!isRecord(payloadLoose)) continue;
+      const p = readFiniteNumber(payloadLoose.pulse);
+      if (p !== activePulse) continue;
+
+      const pk = readStr(payloadLoose.userPhiKey);
+      const ks = readLowerStr(payloadLoose.kaiSignature);
+      const s = (pk ? 1 : 0) + (ks ? 1 : 0);
+      if (s > bestScore) {
+        bestScore = s;
+        best = { userPhiKey: pk, kaiSignature: ks };
+      }
+      if (bestScore >= 2) break;
+    }
+
+    return { userPhiKey: best?.userPhiKey, kaiSignature: best?.kaiSignature, hash: selected?.hash ?? null };
+  }, [selected?.userPhiKey, selected?.kaiSignature, selected?.hash, activePulse]);
 
   const pulseValue = useMemo(() => {
     if (activePulse == null) return { phi: null, usd: null, usdPerPhi: null };
@@ -787,11 +1596,13 @@ function PulseHoneycombInner({
       const p = readFiniteNumber(payloadLoose.pulse);
       if (p !== activePulse) continue;
 
-      const phiValue = computeLivePhi(payloadLoose, activePulse);
+      const payloadPulse = readFiniteNumber(payloadLoose.pulse) ?? activePulse;
+      const isDerived = extractOriginHash(payloadLoose) != null;
+      const phiValue = computeLivePhi(payloadLoose, isDerived ? payloadPulse : nowPulse);
       if (phiValue != null) phiTotal += phiValue;
 
       if (usdPerPhi == null) {
-        const found = computeUsdPerPhi(payloadLoose, activePulse);
+        const found = computeUsdPerPhi(payloadLoose, nowPulse);
         if (found != null) usdPerPhi = found;
       }
     }
@@ -799,11 +1610,12 @@ function PulseHoneycombInner({
     const phi = Number.isFinite(phiTotal) ? phiTotal : null;
     const usd = phi != null && usdPerPhi != null ? phi * usdPerPhi : null;
     return { phi, usd, usdPerPhi };
-  }, [activePulse, registryRev]);
+  }, [activePulse, nowPulse, registryRev]);
 
+  type ChartBundle = ReturnType<typeof bootstrapSeries>;
 
   const chartBundle = useMemo<ChartBundle | null>(() => {
-    if (activePulse == null) return null;
+    if (activePulse == null || nowPulse == null) return null;
     let payload: Record<string, unknown> | null = null;
 
     for (const [, payloadLoose] of memoryRegistry) {
@@ -813,11 +1625,11 @@ function PulseHoneycombInner({
       payload = payloadLoose;
       break;
     }
-
     if (!payload) return null;
 
     const meta = buildValuationMeta(payload);
-    const { unsigned } = computeIntrinsicUnsigned(meta, activePulse);
+    const { unsigned } = computeIntrinsicUnsigned(meta, nowPulse);
+
     const seal = {
       version: 1,
       unit: "Φ",
@@ -831,14 +1643,13 @@ function PulseHoneycombInner({
       stamp: "0",
     } as const;
 
-    return bootstrapSeries(seal, meta, activePulse, 64);
-  }, [activePulse, registryRev]);
+    return bootstrapSeries(seal, meta, nowPulse, 64);
+  }, [activePulse, nowPulse, registryRev]);
 
   const layout = useMemo(() => {
-    const N = filtered.length;
+    const N = nodesRaw.length;
     const coords = hexSpiralCoords(N);
 
-    const PHI = 1.61803398875;
     const radiusPx = Math.round(30 * PHI);
     const pts: Pt[] = coords.map((c) => axialToPixelPointy(c, radiusPx));
 
@@ -861,7 +1672,7 @@ function PulseHoneycombInner({
     const offX = (Number.isFinite(minX) ? -minX : 0) + pad;
     const offY = (Number.isFinite(minY) ? -minY : 0) + pad;
 
-    const items: LayoutItem[] = filtered.map((node, i) => {
+    const items: LayoutItem[] = nodesRaw.map((node, i) => {
       const p = pts[i] ?? { x: 0, y: 0 };
       const x = p.x + offX - hexW / 2;
       const y = p.y + offY - hexH / 2;
@@ -883,7 +1694,7 @@ function PulseHoneycombInner({
     };
 
     return { width, height, items, itemByHash, centerOf };
-  }, [filtered]);
+  }, [nodesRaw]);
 
   const autoPan = useMemo(() => {
     if (!selectedHash) return { x: 0, y: 0 };
@@ -921,24 +1732,23 @@ function PulseHoneycombInner({
     return lines;
   }, [selectedHash, edgeMode, layout, byHash, childrenByParent]);
 
-  const resetToAutoCenter = () => {
-    setUserInteracted(false);
-    setUserPan({ x: 0, y: 0 });
-  };
-
   const selectHash = (hash: string) => {
     const h = hash.toLowerCase();
     setSelectedOverride(h);
+
+    // FIX: reset override so the new selection uses its default (derived→USD, root→Φ)
+    setUnitOverride(null);
+
     broadcastSelectedHash(h);
-    resetToAutoCenter();
+    setUserInteracted(false);
+    setUserPan({ x: 0, y: 0 });
   };
 
   const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     const el = viewportRef.current;
     if (!el) return;
 
-    const delta = e.deltaY;
-    const nextZoom = clamp(zoom * (delta > 0 ? 0.92 : 1.08), 0.35, 3.0);
+    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.92 : 1.08), 0.35, 3.0);
 
     const rect = el.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -954,6 +1764,8 @@ function PulseHoneycombInner({
     setZoom(nextZoom);
     setUserInteracted(true);
     setUserPan({ x: nextPanX, y: nextPanY });
+
+    void worldY;
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -986,62 +1798,115 @@ function PulseHoneycombInner({
     window.open(selected.bestUrl, "_blank", "noopener,noreferrer");
   };
 
-  const copySelectedUrl = async () => {
+  const rememberSelected = async () => {
     if (!selected) return;
-    if (!navigator.clipboard) return;
-    try {
-      await navigator.clipboard.writeText(selected.bestUrl);
-    } catch {
-      ignore();
-    }
+    await copyText(selected.bestUrl);
   };
 
+  const toggleUnit = () => {
+    setUnitOverride((cur) => {
+      const base: UnitMode = cur ?? (selectedIsDerived ? "usd" : "phi");
+      return base === "phi" ? "usd" : "phi";
+    });
+  };
 
-  const titlePulse = activePulse != null ? `Pulse ${activePulse}` : "Pulse";
-  const originLabel = originCandidate ?? "";
+  const mainValue =
+    unitMode === "phi"
+      ? pulseValue.phi != null
+        ? `${formatPhiNumber(pulseValue.phi)} Φ`
+        : "—"
+      : pulseValue.usd != null
+        ? `$${formatUsd(pulseValue.usd)}`
+        : "—";
+
+  const subValue =
+    unitMode === "phi"
+      ? pulseValue.usd != null
+        ? `$${formatUsd(pulseValue.usd)}`
+        : "—"
+      : pulseValue.phi != null
+        ? `${formatPhiNumber(pulseValue.phi)} Φ`
+        : "—";
+
+  const rateLabel = pulseValue.usdPerPhi != null ? `$${formatUsd(pulseValue.usdPerPhi)} / Φ` : "—";
+
+  const proofPhiKey = headerIdentity.userPhiKey;
+  const proofKaiSig = headerIdentity.kaiSignature;
+  const proofHash = selected?.hash ?? null;
 
   return (
-    <div className="phmRoot" aria-label="Pulse Atlas">
+    <div className="phmRoot" aria-label="Pulse Atlas" data-phm-version={PHM_MODAL_VERSION}>
       <header className="phmHeader">
         <div className="phmHeaderLeft">
-          <div className="phmTitleBlock">
-            <div id="phmTitle" className="phmTitle">
-              {titlePulse}
+          <div className="phmSigilCard" aria-label="Pulse sigil glyph">
+            <div className="phmSigilFrame">
+              {activePulse != null ? (
+                <KaiSigil pulse={activePulse} chakraDay={activeChakraDay} size={56} animate />
+              ) : (
+                <div className="phmSigilPlaceholder" />
+              )}
             </div>
-            <div className="phmSub">
-              {originLabel ? <span className="phmOrigin">origin {shortHash(originLabel, 14)}</span> : null}
-              {activeBeat != null ? <span className="phmDot">•</span> : null}
-              {activeBeat != null ? <span className="phmBeatFilter">beat {activeBeat}</span> : null}
+            <div className="phmSigilMeta">
+              <div className="phmSigilPulse">☤KAI {activePulseLabel}</div>
+              <div className="phmSigilSub">
+                <span>Beat {beatLabel}</span>
+                <span className="phmDot">•</span>
+                <span>Step {stepLabel}</span>
+                <span className="phmDot">•</span>
+                <span>{activeChakraDay}</span>
+              </div>
             </div>
           </div>
 
-          <div className="phmChart">
-            {chartBundle ? (
-              <LiveChart
-                data={chartBundle.lineData}
-                live={pulseValue.phi ?? chartBundle.lineData[chartBundle.lineData.length - 1]?.value ?? 0}
-                pv={chartBundle.lineData[chartBundle.lineData.length - 1]?.value ?? 0}
-                premiumX={1}
-                momentX={1}
-                colors={Array.from(COLORS)}
-                height={96}
-                usdPerPhi={pulseValue.usdPerPhi ?? 0}
-                mode="usd"
-              />
-            ) : (
-              <div className="phmChartEmpty">No pulse data</div>
-            )}
+          {/* Value card: click to toggle Φ <-> USD */}
+          <button type="button" className="phmValueCard phmValueCard--switch" onClick={toggleUnit} aria-label="Toggle value unit">
+            <div className="phmValueLabel">Asset Value</div>
+            <div className="phmValuePrimary">{mainValue}</div>
+            <div className="phmValueSecondary">{subValue}</div>
+            <div className="phmValueMeta">{rateLabel}</div>
+          </button>
+
+          <div className="phmHeaderStack">
+            <div className="phmChartWrap" aria-label="Asset value chart">
+              {chartBundle ? (
+                <InteractiveValueChart
+                  lineData={chartBundle.lineData as unknown as ReadonlyArray<unknown>}
+                  mode={unitMode}
+                  usdPerPhiFallback={pulseValue.usdPerPhi}
+                  livePhi={pulseValue.phi}
+                  liveUsd={pulseValue.usd}
+                  usdPerPhiNow={pulseValue.usdPerPhi}
+                />
+              ) : (
+                <div className="phmChart phmChart--lite phmChartEmpty">No pulse data</div>
+              )}
+            </div>
           </div>
         </div>
 
+        {/* Header Right: Proof strip + Close */}
         <div className="phmHeaderRight">
-          <div className="phmValueCard" aria-live="polite">
-            <div className="phmValueLabel">Pulse Value</div>
-            <div className="phmValuePhi">{pulseValue.phi != null ? `${formatPhiNumber(pulseValue.phi)} Φ` : "—"}</div>
-            <div className="phmValueUsd">{pulseValue.usd != null ? `$${formatUsd(pulseValue.usd)}` : "—"}</div>
-            <div className="phmValueMeta">
-              {pulseValue.usdPerPhi != null ? `$${formatUsd(pulseValue.usdPerPhi)} / Φ` : "Live rate"}
-            </div>
+          <div className="phmProofStrip" aria-label="Proof details">
+            {proofHash ? (
+              <button type="button" className="phmProofItem" onClick={() => copyText(proofHash)} title={proofHash}>
+                <span className="phmProofK">Key</span>
+                <span className="phmProofV mono">{shortHash(proofHash, 16)}</span>
+              </button>
+            ) : null}
+
+            {proofPhiKey ? (
+              <button type="button" className="phmProofItem" onClick={() => copyText(proofPhiKey)} title={proofPhiKey}>
+                <span className="phmProofK">ΦKey</span>
+                <span className="phmProofV mono">{shortHash(proofPhiKey, 18)}</span>
+              </button>
+            ) : null}
+
+            {proofKaiSig ? (
+              <button type="button" className="phmProofItem" onClick={() => copyText(proofKaiSig)} title={proofKaiSig}>
+                <span className="phmProofK">KaiSig</span>
+                <span className="phmProofV mono">{shortHash(proofKaiSig, 18)}</span>
+              </button>
+            ) : null}
           </div>
 
           <button type="button" className="phmBtn phmBtnClose" onClick={onClose} aria-label="Close">
@@ -1096,136 +1961,27 @@ function PulseHoneycombInner({
               ))}
             </div>
 
-            <div className="combHint phmHint">
-              Pulse lattice • drag to pan • scroll to zoom
-            </div>
+            <div className="combHint phmHint">Pulse lattice • drag to pan • scroll to zoom</div>
           </div>
         </div>
-
-        <aside className="phmInspector">
-          <div className="inspectorCard phmInspectorCard">
-            <div className="inspectorHead">
-              <div className="inspectorTitle">Selection</div>
-              <div className="inspectorSub">{selected ? shortHash(selected.hash, 16) : "—"}</div>
-            </div>
-
-            <div className="inspectorGrid">
-              {selected?.pulse != null && (
-                <>
-                  <div className="k">Pulse</div>
-                  <div className="v mono">{selected.pulse}</div>
-                </>
-              )}
-
-              {selectedPulse != null && selectedKks && (
-                <>
-                  <div className="k">Beat:Step</div>
-                  <div className="v mono">
-                    {selectedKks.beat}:{selectedKks.stepIndex}
-                  </div>
-                </>
-              )}
-
-              {selected?.chakraDay && (
-                <>
-                  <div className="k">Chakra</div>
-                  <div className="v">{selected.chakraDay}</div>
-                </>
-              )}
-
-              {selected?.phiDelta && (
-                <>
-                  <div className="k">ΔΦ</div>
-                  <div className="v mono">{formatPhi(selected.phiDelta)}</div>
-                </>
-              )}
-
-              {selected?.transferDirection && (
-                <>
-                  <div className="k">Transfer</div>
-                  <div className="v">{selected.transferDirection}</div>
-                </>
-              )}
-
-              {selected?.parentHash && (
-                <>
-                  <div className="k">Parent</div>
-                  <div className="v mono">
-                    {byHash.has(selected.parentHash) ? (
-                      <button className="linkBtn" type="button" onClick={() => selectHash(selected.parentHash!)}>
-                        {shortHash(selected.parentHash, 14)}
-                      </button>
-                    ) : (
-                      shortHash(selected.parentHash, 14)
-                    )}
-                  </div>
-                </>
-              )}
-
-              {selected?.originHash && (
-                <>
-                  <div className="k">Origin</div>
-                  <div className="v mono">
-                    {byHash.has(selected.originHash) ? (
-                      <button className="linkBtn" type="button" onClick={() => selectHash(selected.originHash!)}>
-                        {shortHash(selected.originHash, 14)}
-                      </button>
-                    ) : (
-                      shortHash(selected.originHash, 14)
-                    )}
-                  </div>
-                </>
-              )}
-
-              {selected?.userPhiKey && (
-                <>
-                  <div className="k">PhiKey</div>
-                  <div className="v mono">{shortHash(selected.userPhiKey, 20)}</div>
-                </>
-              )}
-
-              {selected?.kaiSignature && (
-                <>
-                  <div className="k">KaiSig</div>
-                  <div className="v mono">{shortHash(selected.kaiSignature, 20)}</div>
-                </>
-              )}
-
-              {selected?.degree != null && (
-                <>
-                  <div className="k">Degree</div>
-                  <div className="v mono">{selected.degree}</div>
-                </>
-              )}
-            </div>
-
-            <div className="inspectorActions">
-              <button type="button" className="primaryBtn" onClick={openSelected} disabled={!selected}>
-                Open
-              </button>
-              <button type="button" className="miniBtn" onClick={copySelectedUrl} disabled={!selected}>
-                Copy URL
-              </button>
-            </div>
-
-            {selected?.sources?.length ? (
-              <details className="sources">
-                <summary>Sources ({selected.sources.length})</summary>
-                <div className="sourcesList">
-                  {selected.sources.slice(0, 40).map((s, i) => (
-                    <div key={`${i}-${s}`} className="sourceItem mono">
-                      {browserViewUrl(s)}
-                    </div>
-                  ))}
-                  {selected.sources.length > 40 ? (
-                    <div className="sourceMore">… {selected.sources.length - 40} more</div>
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
-          </div>
-        </aside>
       </div>
+
+      {/* Slim bottom bar */}
+      <footer className="phmBottomBar" aria-label="Actions">
+        <div className="phmSelChip" title={selected?.hash ?? ""}>
+          <span className="phmSelLabel">SEL</span>
+          <span className="phmSelHash">{selected ? shortHash(selected.hash, 18) : "—"}</span>
+        </div>
+
+        <div className="phmBottomActions">
+          <button type="button" className="phmMiniBtn" onClick={openSelected} disabled={!selected}>
+            Proof of Breath™
+          </button>
+          <button type="button" className="phmMiniBtn phmMiniBtn--glow" onClick={rememberSelected} disabled={!selected}>
+            Remember
+          </button>
+        </div>
+      </footer>
     </div>
   );
 }
