@@ -8,6 +8,7 @@ import VerifierFrame from "../components/KaiVoh/VerifierFrame";
 import { parseSlug, verifySigilSvg, type VerifyResult } from "../utils/verifySigil";
 import { DEFAULT_ISSUANCE_POLICY, quotePhiForUsd } from "../utils/phi-issuance";
 import { currency as fmtPhi, usd as fmtUsd } from "../components/valuation/display";
+import LiveChart from "../components/valuation/chart/LiveChart";
 import {
   buildVerifierSlug,
   buildVerifierUrl,
@@ -39,6 +40,8 @@ import { useValuation } from "./SigilPage/useValuation";
 import type { SigilMetadataLite } from "../utils/valuation";
 import { jcsCanonicalize } from "../utils/jcs";
 import { svgCanonicalForHash } from "../utils/svgProof";
+import useRollingChartSeries from "../components/VerifierStamper/hooks/useRollingChartSeries";
+import { BREATH_MS } from "../components/valuation/constants";
 
 /* ────────────────────────────────────────────────────────────────
    Utilities
@@ -389,11 +392,11 @@ function TabBtn(props: { active: boolean; title: string; text: string; icon: Rea
   );
 }
 
-function OfficialBadge(props: { kind: BadgeKind; title: string; subtitle?: string }): ReactElement {
+function OfficialBadge(props: { kind: BadgeKind; title: string; subtitle?: string; onClick?: () => void; ariaLabel?: string }): ReactElement {
   const data = props.kind === "ok" ? "ok" : props.kind === "fail" ? "fail" : props.kind === "busy" ? "busy" : "idle";
   const showCheck = props.kind === "ok";
-  return (
-    <div className="official" data-kind={data} aria-live="polite">
+  const body = (
+    <>
       <div className="official-top">
         <div className="official-ring" aria-hidden="true">
           {showCheck ? <span className="official-check">✓</span> : null}
@@ -401,41 +404,106 @@ function OfficialBadge(props: { kind: BadgeKind; title: string; subtitle?: strin
         <div className="official-title">{props.title}</div>
       </div>
       {props.subtitle ? <div className="official-sub">{props.subtitle}</div> : null}
+    </>
+  );
+  if (props.onClick) {
+    return (
+      <button
+        type="button"
+        className="official official--button"
+        data-kind={data}
+        aria-live="polite"
+        onClick={props.onClick}
+        aria-label={props.ariaLabel ?? props.title}
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <div className="official" data-kind={data} aria-live="polite">
+      {body}
     </div>
   );
 }
 
-function SealPill(props: { label: string; state: SealState; detail?: string }): ReactElement {
+function SealPill(props: { label: string; state: SealState; detail?: string; onClick?: () => void; ariaLabel?: string }): ReactElement {
   const icon = props.state === "valid" ? "✓" : props.state === "invalid" ? "✕" : props.state === "busy" ? "⟡" : props.state === "na" ? "—" : "·";
   const text = props.state === "valid" ? "VERIFIED" : props.state === "invalid" ? "INVALID" : props.state === "busy" ? "CHECKING" : props.state === "na" ? "N/A" : "ABSENT";
-  return (
-    <div className="seal" data-state={props.state} title={props.detail ?? ""}>
+  const body = (
+    <>
       <span className="seal-ic" aria-hidden="true">
         {icon}
       </span>
       <span className="seal-lbl">{props.label}</span>
       <span className="seal-txt">{text}</span>
+    </>
+  );
+  if (props.onClick) {
+    return (
+      <button
+        type="button"
+        className="seal seal--button"
+        data-state={props.state}
+        title={props.detail ?? ""}
+        onClick={props.onClick}
+        aria-label={props.ariaLabel ?? `${props.label} seal`}
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <div className="seal" data-state={props.state} title={props.detail ?? ""}>
+      {body}
     </div>
   );
 }
 
-function MiniField(props: { label: string; value: string; title?: string }): ReactElement {
-  return (
-    <div className="mini">
+function MiniField(props: { label: string; value: string; title?: string; onClick?: () => void; ariaLabel?: string }): ReactElement {
+  const body = (
+    <>
       <div className="mini-k">{props.label}</div>
       <div className="mini-v mono" title={props.title ?? props.value}>
         {props.value || "—"}
       </div>
-    </div>
+    </>
   );
+  if (props.onClick) {
+    return (
+      <button type="button" className="mini mini--button" onClick={props.onClick} aria-label={props.ariaLabel ?? props.label} title={props.title ?? props.value}>
+        {body}
+      </button>
+    );
+  }
+  return <div className="mini">{body}</div>;
 }
 
-function LiveValuePill(props: { phiValue: number; usdValue: number | null; label: string; ariaLabel: string }): ReactElement {
+function LiveValuePill(props: {
+  phiValue: number;
+  usdValue: number | null;
+  label: string;
+  ariaLabel: string;
+  onPhiClick?: () => void;
+  onUsdClick?: () => void;
+}): ReactElement {
   return (
     <div className="vseal-value" aria-label={props.ariaLabel}>
       <div className="vseal-value-label">{props.label}</div>
-      <div className="vseal-value-phi">{fmtPhi(props.phiValue)}</div>
-      <div className="vseal-value-usd">{props.usdValue == null ? "—" : fmtUsd(props.usdValue)}</div>
+      {props.onPhiClick ? (
+        <button type="button" className="vseal-value-btn vseal-value-phi" onClick={props.onPhiClick} aria-label="Open live chart for Φ value">
+          {fmtPhi(props.phiValue)}
+        </button>
+      ) : (
+        <div className="vseal-value-phi">{fmtPhi(props.phiValue)}</div>
+      )}
+      {props.onUsdClick ? (
+        <button type="button" className="vseal-value-btn vseal-value-usd" onClick={props.onUsdClick} aria-label="Open live chart for USD value">
+          {props.usdValue == null ? "—" : fmtUsd(props.usdValue)}
+        </button>
+      ) : (
+        <div className="vseal-value-usd">{props.usdValue == null ? "—" : fmtUsd(props.usdValue)}</div>
+      )}
     </div>
   );
 }
@@ -587,6 +655,14 @@ export default function VerifyPage(): ReactElement {
   const [openZkInputs, setOpenZkInputs] = useState<boolean>(false);
   const [openZkHints, setOpenZkHints] = useState<boolean>(false);
 
+  // Live chart popover
+  const [chartOpen, setChartOpen] = useState<boolean>(false);
+  const [chartFocus, setChartFocus] = useState<"phi" | "usd">("phi");
+  const [chartReflowKey, setChartReflowKey] = useState<number>(0);
+
+  // Seal info popovers
+  const [sealPopover, setSealPopover] = useState<"proof" | "kas" | "g16" | null>(null);
+
   // Header sigil preview (safe <img> object URL)
   const [sigilPreviewUrl, setSigilPreviewUrl] = useState<string>("");
 
@@ -672,6 +748,79 @@ export default function VerifyPage(): ReactElement {
     ensureMetaTag("name", "twitter:description", `Proof of Breath™ • ${statusLabel} • Pulse ${slug.pulse ?? "—"}`);
     ensureMetaTag("name", "twitter:image", ogImageUrl.toString());
   }, [authorSigVerified, result, slug.pulse, slug.raw, slugRaw, zkVerify]);
+
+  const openChartPopover = useCallback((focus: "phi" | "usd") => {
+    setChartFocus(focus);
+    setChartOpen(true);
+    setChartReflowKey((k) => k + 1);
+  }, []);
+
+  const closeChartPopover = useCallback(() => {
+    setChartOpen(false);
+  }, []);
+
+  const closeSealPopover = useCallback(() => {
+    setSealPopover(null);
+  }, [setSealPopover]);
+
+  const openProofPopover = useCallback(() => {
+    setSealPopover("proof");
+  }, [setSealPopover]);
+
+  const openKasPopover = useCallback(() => {
+    setPanel("audit");
+    setSealPopover("kas");
+  }, [setPanel, setSealPopover]);
+
+  const openG16Popover = useCallback(() => {
+    setPanel("zk");
+    setSealPopover("g16");
+  }, [setPanel, setSealPopover]);
+
+  React.useEffect(() => {
+    if (chartOpen) setChartReflowKey((k) => k + 1);
+  }, [chartOpen, chartFocus]);
+
+  React.useEffect(() => {
+    if (!chartOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeChartPopover();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chartOpen, closeChartPopover]);
+
+  React.useEffect(() => {
+    if (!sealPopover) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeSealPopover();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closeSealPopover, sealPopover]);
+
+  const chartPhi = useMemo(() => {
+    const candidate = displayPhi ?? liveValuePhi ?? 0;
+    return Number.isFinite(candidate) ? candidate : 0;
+  }, [displayPhi, liveValuePhi]);
+
+  const seriesKey = useMemo(() => {
+    if (result.status === "ok") {
+      return `${result.embedded.pulse ?? slug.pulse ?? "x"}|${result.embedded.kaiSignature ?? ""}|${result.embedded.phiKey ?? ""}`;
+    }
+    return slug.raw ? `slug-${slug.raw}` : "verify";
+  }, [result, slug.pulse, slug.raw]);
+
+  const chartData = useRollingChartSeries({
+    seriesKey,
+    sampleMs: BREATH_MS,
+    valuePhi: chartPhi,
+    usdPerPhi,
+    maxPoints: 4096,
+    snapKey: chartReflowKey,
+  });
+
+  const pvForChart = useMemo(() => (chartPhi > 0 ? chartPhi : 0), [chartPhi]);
 
   const zkMeta = useMemo(() => {
     if (embeddedProof) return embeddedProof;
@@ -843,16 +992,17 @@ export default function VerifyPage(): ReactElement {
       const bundleUnsigned = buildBundleUnsigned(bundleSeed);
       const bundleHashNext = await hashBundle(bundleUnsigned);
 
-      const authorSigNext = embedded?.authorSig;
-      let authorSigOk: boolean | null = null;
-      if (authorSigNext) {
-        if (isKASAuthorSig(authorSigNext)) {
-          const authorBundleHash = bundleHashFromAuthorSig(authorSigNext);
-          authorSigOk = await verifyBundleAuthorSig(authorBundleHash ?? bundleHashNext, authorSigNext);
-        } else {
-          authorSigOk = false;
-        }
-      }
+const authorSigNext = embedded?.authorSig;
+let authorSigOk: boolean | null = null;
+
+if (authorSigNext) {
+  if (isKASAuthorSig(authorSigNext)) {
+    // ✅ Verify KAS against the artifact's recomputed unsigned bundle hash
+    authorSigOk = await verifyBundleAuthorSig(bundleHashNext, authorSigNext);
+  } else {
+    authorSigOk = false;
+  }
+}
 
       if (!active) return;
       setProofCapsule(capsule);
@@ -1159,6 +1309,60 @@ export default function VerifyPage(): ReactElement {
     return zkVerify ? "valid" : "invalid";
   }, [busy, zkMeta?.zkPoseidonHash, zkVerify]);
 
+  const sealStateLabel = useCallback((state: SealState): string => {
+    switch (state) {
+      case "valid":
+        return "VERIFIED";
+      case "invalid":
+        return "INVALID";
+      case "busy":
+        return "CHECKING";
+      case "na":
+        return "N/A";
+      case "off":
+      default:
+        return "ABSENT";
+    }
+  }, []);
+
+  const sealPopoverContent = useMemo(() => {
+    if (!sealPopover) return null;
+    if (sealPopover === "proof") {
+      return {
+        title: "Proof of Breath™",
+        status: result.status === "ok" ? "VERIFIED" : result.status === "error" ? "FAILED" : "STANDBY",
+body: [
+  "Proof of Breath™ is the sovereign attestation that a ΦKey originates from a living human signature rail and that its integrity chain remains unbroken.",
+  "This badge is issued only when the inhaled ΦKey, its vessel hash, sigil hash, and attestation bundle collapse into a deterministic, recomputable proof capsule under canonical rules.",
+  "No simulacra, no mutable links, no soft checks—only canonicalization, cryptographic determinism, and verifiable coherence.",
+],
+
+      };
+    }
+    if (sealPopover === "kas") {
+      return {
+        title: "KAS • Kai Author Signature",
+        status: sealStateLabel(sealKAS),
+body: [
+  "KAS is the WebAuthn-authorized author seal binding a living human credential to the canonical bundle hash.",
+  "Verification validates the signed challenge, credential ID, RPID/origin scope, and public key against the recomputed canonical bundle hash—proving the author’s custodial intent over this exact artifact.",
+  "This is bank-grade identity attestation: phishing-resistant, tamper-evident, and replay-resistant by design—enforced through a fresh nonce/pulse challenge under strict verification policy.",
+],
+
+
+      };
+    }
+    return {
+      title: "G16 • Groth16 Verification",
+      status: sealStateLabel(sealZK),
+      body: [
+         "G16 is the zero-knowledge proof path for the ΦKey proof bundle, executed under Groth16 and Poseidon constraints.",
+  "Verification proves the embedded proof and public inputs satisfy the circuit, without revealing private witness material.",
+  "This seal represents cryptographic finality—provable integrity with privacy preserved."
+      ],
+    };
+  }, [result.status, sealKAS, sealPopover, sealStateLabel, sealZK]);
+
   const hasSvgBytes = Boolean(svgText.trim());
   const expectedSvgHash = sharedReceipt?.svgHash ?? embeddedProof?.svgHash ?? "";
   const hasKasIdentity = Boolean(embeddedProof?.authorSig && isKASAuthorSig(embeddedProof.authorSig));
@@ -1341,18 +1545,38 @@ export default function VerifyPage(): ReactElement {
               </div>
             ) : null}
 
-            <OfficialBadge kind={badge.kind} title={badge.title} subtitle={badge.subtitle} />
+            <OfficialBadge
+              kind={badge.kind}
+              title={badge.title}
+              subtitle={badge.subtitle}
+              onClick={openProofPopover}
+              ariaLabel="Open Proof of Breath attestation details"
+            />
           </div>
 
           <div className="vseals" aria-label="Sovereign seals">
-            <SealPill label="KAS" state={sealKAS} detail={embeddedProof?.authorSig ? "Author seal (WebAuthn KAS)" : "No author seal present"} />
-            <SealPill label="G16" state={sealZK} detail={zkMeta?.zkPoseidonHash ? "Groth16 + Poseidon rail" : "No ZK rail present"} />
+            <SealPill
+              label="KAS"
+              state={sealKAS}
+              detail={embeddedProof?.authorSig ? "Author seal (WebAuthn KAS)" : "No author seal present"}
+              onClick={openKasPopover}
+              ariaLabel="Open KAS attestation details"
+            />
+            <SealPill
+              label="G16"
+              state={sealZK}
+              detail={zkMeta?.zkPoseidonHash ? "Groth16 + Poseidon rail" : "No ZK rail present"}
+              onClick={openG16Popover}
+              ariaLabel="Open Groth16 attestation details"
+            />
             {result.status === "ok" && displayPhi != null ? (
               <LiveValuePill
                 phiValue={displayPhi}
                 usdValue={displayUsd}
                 label={displayLabel}
                 ariaLabel={displayAriaLabel}
+                onPhiClick={() => openChartPopover("phi")}
+                onUsdClick={displayUsd == null ? undefined : () => openChartPopover("usd")}
               />
             ) : null}
           </div>
@@ -1378,6 +1602,71 @@ export default function VerifyPage(): ReactElement {
         </div>
 
       </header>
+
+      {chartOpen ? (
+        <div
+          className="chart-popover-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Live chart"
+          onMouseDown={closeChartPopover}
+          onClick={closeChartPopover}
+        >
+          <div className="chart-popover" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+            <div className="chart-popover-head">
+              <div className="chart-popover-title">{chartFocus === "phi" ? "Φ Resonance · Live" : "$ Price · Live"}</div>
+              <button type="button" className="vmodal-close" onClick={closeChartPopover} aria-label="Close chart" title="Close chart">
+                ×
+              </button>
+            </div>
+            <div className="chart-popover-body">
+              <React.Suspense fallback={<div style={{ padding: 16, color: "var(--inkDim)" }}>Loading chart…</div>}>
+                <LiveChart
+                  data={chartData}
+                  live={chartPhi}
+                  pv={pvForChart}
+                  premiumX={1}
+                  momentX={1}
+                  colors={["rgba(167,255,244,1)"]}
+                  usdPerPhi={usdPerPhi}
+                  mode={chartFocus === "usd" ? "usd" : "phi"}
+                  reflowKey={chartReflowKey}
+                />
+              </React.Suspense>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {sealPopoverContent ? (
+        <div
+          className="seal-popover-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${sealPopoverContent.title} details`}
+          onMouseDown={closeSealPopover}
+          onClick={closeSealPopover}
+        >
+          <div className="seal-popover" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+            <div className="seal-popover-head">
+              <div>
+                <div className="seal-popover-kicker">Official Attestation</div>
+                <div className="seal-popover-title">{sealPopoverContent.title}</div>
+              </div>
+              <div className="seal-popover-status">{sealPopoverContent.status}</div>
+              <button type="button" className="vmodal-close" onClick={closeSealPopover} aria-label="Close attestation details" title="Close">
+                ×
+              </button>
+            </div>
+            <div className="seal-popover-body">
+              {sealPopoverContent.body.map((line) => (
+                <p key={line}>{line}</p>
+              ))}
+              <div className="seal-popover-footer">Breath-Sealed. Proof-Verified. Truth-Aligned.</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Body */}
       <div className="vbody">
@@ -1595,10 +1884,14 @@ export default function VerifyPage(): ReactElement {
                   <MiniField
                     label={displaySource === "balance" ? "Glyph Φ balance" : displaySource === "embedded" ? "Glyph Φ value" : "Live Φ value"}
                     value={fmtPhi(displayPhi)}
+                    onClick={() => openChartPopover("phi")}
+                    ariaLabel="Open live chart for Φ value"
                   />
                   <MiniField
                     label={displaySource === "balance" ? "Glyph USD balance" : displaySource === "embedded" ? "Glyph USD value" : "Live USD value"}
                     value={displayUsd == null ? "—" : fmtUsd(displayUsd)}
+                    onClick={displayUsd == null ? undefined : () => openChartPopover("usd")}
+                    ariaLabel="Open live chart for USD value"
                   />
                 </div>
               ) : null}
@@ -1777,10 +2070,24 @@ export default function VerifyPage(): ReactElement {
           spellCheck={false}
         />
         <div className="vmodal-actions">
-          <button type="button" className="vcta" onClick={() => void runVerify()} disabled={busy} title={busy ? "Verifying…" : "Verify"}>
+          <button
+            type="button"
+            className="vcta"
+            data-perf-action="verify"
+            onClick={() => void runVerify()}
+            disabled={busy}
+            title={busy ? "Verifying…" : "Verify"}
+          >
             ⟡ {busy ? "VERIFYING" : "VERIFY"}
           </button>
-          <button type="button" className="vcta vcta--ghost" onClick={() => void remember(svgText, "SVG")} disabled={!svgText.trim()} title="💠 Remember">
+          <button
+            type="button"
+            className="vcta vcta--ghost"
+            data-perf-action="remember-svg"
+            onClick={() => void remember(svgText, "SVG")}
+            disabled={!svgText.trim()}
+            title="💠 Remember"
+          >
             💠 REMEMBER
           </button>
         </div>
@@ -1789,10 +2096,23 @@ export default function VerifyPage(): ReactElement {
       <Modal open={openAuditJson} title="Audit JSON" subtitle="Canonical audit payload (vesselHash + sigilHash → bundleHash)." onClose={() => setOpenAuditJson(false)}>
         <textarea className="vta vta--readonly" readOnly value={auditBundleText || "—"} />
         <div className="vmodal-actions">
-          <button type="button" className="vcta" onClick={() => void remember(auditBundleText, "Audit JSON")} disabled={!auditBundleText} title="💠 Remember">
+          <button
+            type="button"
+            className="vcta"
+            data-perf-action="remember-audit"
+            onClick={() => void remember(auditBundleText, "Audit JSON")}
+            disabled={!auditBundleText}
+            title="💠 Remember"
+          >
             💠 REMEMBER
           </button>
-          <button type="button" className="vcta vcta--ghost" onClick={() => setOpenAuditJson(false)} title="Close">
+          <button
+            type="button"
+            className="vcta vcta--ghost"
+            data-perf-action="close-audit"
+            onClick={() => setOpenAuditJson(false)}
+            title="Close"
+          >
             CLOSE
           </button>
         </div>
@@ -1801,10 +2121,23 @@ export default function VerifyPage(): ReactElement {
       <Modal open={openZkProof} title="ZK Proof" subtitle="Full embedded Groth16 proof payload." onClose={() => setOpenZkProof(false)}>
         <textarea className="vta vta--readonly" readOnly value={embeddedZkProof || "—"} />
         <div className="vmodal-actions">
-          <button type="button" className="vcta" onClick={() => void remember(embeddedZkProof, "ZK proof")} disabled={!embeddedZkProof} title="💠 Remember">
+          <button
+            type="button"
+            className="vcta"
+            data-perf-action="remember-zk-proof"
+            onClick={() => void remember(embeddedZkProof, "ZK proof")}
+            disabled={!embeddedZkProof}
+            title="💠 Remember"
+          >
             💠 REMEMBER
           </button>
-          <button type="button" className="vcta vcta--ghost" onClick={() => setOpenZkProof(false)} title="Close">
+          <button
+            type="button"
+            className="vcta vcta--ghost"
+            data-perf-action="close-zk-proof"
+            onClick={() => setOpenZkProof(false)}
+            title="Close"
+          >
             CLOSE
           </button>
         </div>
@@ -1813,10 +2146,23 @@ export default function VerifyPage(): ReactElement {
       <Modal open={openZkInputs} title="ZK Public Inputs" subtitle="Full embedded public inputs payload." onClose={() => setOpenZkInputs(false)}>
         <textarea className="vta vta--readonly" readOnly value={embeddedZkPublicInputs || "—"} />
         <div className="vmodal-actions">
-          <button type="button" className="vcta" onClick={() => void remember(embeddedZkPublicInputs, "Public inputs")} disabled={!embeddedZkPublicInputs} title="💠 Remember">
+          <button
+            type="button"
+            className="vcta"
+            data-perf-action="remember-zk-inputs"
+            onClick={() => void remember(embeddedZkPublicInputs, "Public inputs")}
+            disabled={!embeddedZkPublicInputs}
+            title="💠 Remember"
+          >
             💠 REMEMBER
           </button>
-          <button type="button" className="vcta vcta--ghost" onClick={() => setOpenZkInputs(false)} title="Close">
+          <button
+            type="button"
+            className="vcta vcta--ghost"
+            data-perf-action="close-zk-inputs"
+            onClick={() => setOpenZkInputs(false)}
+            title="Close"
+          >
             CLOSE
           </button>
         </div>
@@ -1825,10 +2171,23 @@ export default function VerifyPage(): ReactElement {
       <Modal open={openZkHints} title="Proof Hints" subtitle="Explorer/API hints embedded in the bundle." onClose={() => setOpenZkHints(false)}>
         <textarea className="vta vta--readonly" readOnly value={embeddedProofHints || "—"} />
         <div className="vmodal-actions">
-          <button type="button" className="vcta" onClick={() => void remember(embeddedProofHints, "Proof hints")} disabled={!embeddedProofHints} title="💠 Remember">
+          <button
+            type="button"
+            className="vcta"
+            data-perf-action="remember-proof-hints"
+            onClick={() => void remember(embeddedProofHints, "Proof hints")}
+            disabled={!embeddedProofHints}
+            title="💠 Remember"
+          >
             💠 REMEMBER
           </button>
-          <button type="button" className="vcta vcta--ghost" onClick={() => setOpenZkHints(false)} title="Close">
+          <button
+            type="button"
+            className="vcta vcta--ghost"
+            data-perf-action="close-proof-hints"
+            onClick={() => setOpenZkHints(false)}
+            title="Close"
+          >
             CLOSE
           </button>
         </div>

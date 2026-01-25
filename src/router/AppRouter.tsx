@@ -10,20 +10,22 @@ import {
   SigilMintRoute,
 } from "../App";
 import KaiSplashScreen from "../components/KaiSplashScreen";
+import { PerfProfiler } from "../perf/PerfProfiler";
 
 // Standalone pages stay lazy (RouteLoader allowed here)
 const SigilFeedPage = React.lazy(() => import("../pages/SigilFeedPage"));
-const SigilPage = React.lazy(() => import("../pages/SigilPage/SigilPage"));
 const PShort = React.lazy(() => import("../pages/PShort"));
 const VerifyPage = React.lazy(() => import("../pages/VerifyPage"));
 const VerifyEmbedPage = React.lazy(() => import("../pages/VerifyEmbedPage"));
+
+// ✅ SigilPage stays eager so it always opens offline (no missing chunk)
+import SigilPage from "../pages/SigilPage/SigilPage";
 
 // ✅ HOME MUST BE INSTANT → eager import (no Suspense fallback)
 import VerifierStamper from "../components/VerifierStamper/VerifierStamper";
 
 const PREFETCH_LAZY_ROUTES: ReadonlyArray<() => Promise<unknown>> = [
   () => import("../pages/SigilFeedPage"),
-  () => import("../pages/SigilPage/SigilPage"),
   () => import("../pages/PShort"),
   () => import("../pages/VerifyPage"),
   () => import("../pages/VerifyEmbedPage"),
@@ -87,6 +89,64 @@ function withChromeSuspense(node: React.ReactElement): React.JSX.Element {
   return <Suspense fallback={null}>{node}</Suspense>;
 }
 
+export function AppRoutes(): React.JSX.Element {
+  return (
+    <>
+      {/* stays allowed; your App.tsx already hard-kills splash on "/" */}
+      <KaiSplashScreen />
+
+      <PerfProfiler id="routes">
+        <Routes>
+          {/* ───────────── Standalone routes (RouteLoader is allowed here) ───────────── */}
+          <Route path="s" element={withStandaloneSuspense(<SigilPage />)} />
+          <Route path="s/:hash" element={withStandaloneSuspense(<SigilPage />)} />
+
+          <Route path="stream" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="stream/p/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="stream/c/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="feed" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="feed/p/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+
+          <Route path="p~:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="p~:token/*" element={withStandaloneSuspense(<PShort />)} />
+
+          <Route path="token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="p~token" element={withStandaloneSuspense(<SigilFeedPage />)} />
+          <Route path="p" element={withStandaloneSuspense(<PShort />)} />
+
+          <Route path="verify/*" element={withStandaloneSuspense(<VerifyPage />)} />
+          <Route path="embed/verify/:slug" element={withStandaloneSuspense(<VerifyEmbedPage />)} />
+
+          {/* ───────────── App shell routes (NO RouteLoader, home = instant) ───────────── */}
+          <Route
+            element={
+              <PerfProfiler id="app-chrome">
+                <AppChrome />
+              </PerfProfiler>
+            }
+          >
+            <Route
+              index
+              element={
+                <PerfProfiler id="verifier-stamper">
+                  <VerifierStamper />
+                </PerfProfiler>
+              }
+            />
+            <Route path="mint" element={<SigilMintRoute />} />
+            <Route path="voh" element={<KaiVohRoute />} />
+            <Route path="explorer" element={<ExplorerRoute />} />
+            <Route path="keystream" element={<ExplorerRoute />} />
+            <Route path="klock" element={<KlockRoute />} />
+            <Route path="klok" element={<KlockRoute />} />
+            <Route path="*" element={withChromeSuspense(<NotFound />)} />
+          </Route>
+        </Routes>
+      </PerfProfiler>
+    </>
+  );
+}
+
 export default function AppRouter(): React.JSX.Element {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -121,42 +181,7 @@ export default function AppRouter(): React.JSX.Element {
 
   return (
     <BrowserRouter>
-      {/* stays allowed; your App.tsx already hard-kills splash on "/" */}
-      <KaiSplashScreen />
-
-      <Routes>
-        {/* ───────────── Standalone routes (RouteLoader is allowed here) ───────────── */}
-        <Route path="s" element={withStandaloneSuspense(<SigilPage />)} />
-        <Route path="s/:hash" element={withStandaloneSuspense(<SigilPage />)} />
-
-        <Route path="stream" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="stream/p/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="stream/c/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="feed" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="feed/p/:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-
-        <Route path="p~:token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="p~:token/*" element={withStandaloneSuspense(<PShort />)} />
-
-        <Route path="token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="p~token" element={withStandaloneSuspense(<SigilFeedPage />)} />
-        <Route path="p" element={withStandaloneSuspense(<PShort />)} />
-
-        <Route path="verify/*" element={withStandaloneSuspense(<VerifyPage />)} />
-        <Route path="embed/verify/:slug" element={withStandaloneSuspense(<VerifyEmbedPage />)} />
-
-        {/* ───────────── App shell routes (NO RouteLoader, home = instant) ───────────── */}
-        <Route element={<AppChrome />}>
-          <Route index element={<VerifierStamper />} />
-          <Route path="mint" element={<SigilMintRoute />} />
-          <Route path="voh" element={<KaiVohRoute />} />
-          <Route path="explorer" element={<ExplorerRoute />} />
-          <Route path="keystream" element={<ExplorerRoute />} />
-          <Route path="klock" element={<KlockRoute />} />
-          <Route path="klok" element={<KlockRoute />} />
-          <Route path="*" element={withChromeSuspense(<NotFound />)} />
-        </Route>
-      </Routes>
+      <AppRoutes />
     </BrowserRouter>
   );
 }

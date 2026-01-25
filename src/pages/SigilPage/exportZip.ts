@@ -1,7 +1,7 @@
 // src/pages/SigilPage/exportZip.ts
 "use client";
 
-import { svgBlobForExport, pngBlobFromSvg, EXPORT_PX } from "../../utils/qrExport";
+import { pngBlobFromSvg } from "../../utils/qrExport";
 import { makeProvenanceEntry } from "../../utils/provenance";
 import { retagSvgIdsForStep, ensureCanonicalMetadataFirst } from "./svgOps";
 import { loadJSZip, signal } from "./utils";
@@ -14,6 +14,84 @@ import {
   readIntentionSigil,
 } from "./verifierCanon";
 import type { SigilPayload } from "../../types/sigil";
+import { extractEmbeddedMetaFromSvg } from "../../utils/sigilMetadata";
+import { embedProofMetadata } from "../../utils/svgProof";
+import { buildProofHints, generateZkProofFromPoseidonHash } from "../../utils/zkProof";
+import { computeZkPoseidonHash } from "../../utils/kai";
+import { ensureTitleAndDesc, ensureViewBoxOnClone, ensureXmlns } from "../../utils/svgMeta";
+import {
+  buildBundleUnsigned,
+  buildVerifierUrl,
+  hashBundle,
+  hashProofCapsuleV1,
+  hashSvgText,
+  normalizeChakraDay,
+  PROOF_CANON,
+  PROOF_HASH_ALG,
+  type ProofCapsuleV1,
+} from "../../components/KaiVoh/verifierProof";
+import type { SigilProofHints } from "../../types/sigil";
+
+/**
+ * We export at the largest possible px that the *current device* can actually rasterize.
+ * iOS Safari is the most sensitive; we'll try big -> smaller until it succeeds.
+ */
+// Desktop can handle 4096 reliably
+const EXPORT_PX_CANDIDATES_DESKTOP: readonly number[] = [4096];
+
+// ✅ Mobile hard-cap (iOS + generic mobile): 2048 max for reliability
+const EXPORT_PX_CANDIDATES_IOS: readonly number[] = [2048, 1536, 1024];
+const EXPORT_PX_CANDIDATES_MOBILE_GENERIC: readonly number[] = [2048, 1536, 1024];
+
+function isIOS(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const platform = (navigator as unknown as { platform?: string }).platform || "";
+  const maxTouchPoints = (navigator as unknown as { maxTouchPoints?: number }).maxTouchPoints ?? 0;
+
+  // iPadOS sometimes reports MacIntel but has touch points.
+  const iOSUA = /iPad|iPhone|iPod/i.test(ua) || /iPad|iPhone|iPod/i.test(platform);
+  const iPadOS = platform === "MacIntel" && maxTouchPoints > 1;
+  return iOSUA || iPadOS;
+}
+
+function isLikelyMobile(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
+}
+
+async function pngBlobFromSvgBestFit(
+  svgBlob: Blob,
+  candidates: readonly number[]
+): Promise<{ pngBlob: Blob; usedPxMax: number }> {
+  let lastErr: unknown = null;
+
+  for (const px of candidates) {
+    try {
+      const pngBlob = await pngBlobFromSvg(svgBlob, px);
+      return { pngBlob, usedPxMax: px };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  const msg = lastErr instanceof Error ? lastErr.message : "Unknown error while rasterizing PNG";
+  throw new Error(`PNG export failed at all sizes: ${msg}`);
+}
+
+const readPublicInput0 = (inputs: unknown): string | null => {
+  if (Array.isArray(inputs) && typeof inputs[0] === "string") {
+    return inputs[0];
+  }
+  if (inputs && typeof inputs === "object") {
+    const obj = inputs as Record<string, unknown>;
+    if (typeof obj[0] === "string") return obj[0];
+    if (typeof obj.publicInput === "string") return obj.publicInput;
+    if (typeof obj[1] === "string") return obj[1];
+  }
+  return null;
+};
 
 /** Chakra day union required by SigilSharePayload */
 type ChakraDay =
@@ -158,6 +236,28 @@ function updateSvgUrlSurfaces(svgEl: SVGSVGElement, fullUrl: string): void {
   });
 }
 
+/**
+ * iOS-safe blob download:
+ * - Always use the same "anchor click" behavior you already had.
+ * - Never revoke immediately (iOS reads blobs late via Files/Share pipeline).
+ */
+function downloadBlobAsFile(blob: Blob, filename: string): void {
+  const dlUrl = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = dlUrl;
+  a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  // ✅ iOS: keep URL alive long enough for OS to fully read it
+  window.setTimeout(() => URL.revokeObjectURL(dlUrl), 60_000);
+}
+
 export async function exportZIP(ctx: {
   expired: boolean;
   exporting: boolean;
@@ -205,7 +305,7 @@ export async function exportZIP(ctx: {
   try {
     setExporting(true);
 
-    const base = `sigil_${(localHash || routeHash || "mint").slice(0, 16)}`;
+
     const stepsNum = (payload.stepsPerBeat ?? STEPS_PER_BEAT) as number;
 
     // KKS: sealed step is derived strictly from the sealed pulse and steps/beat
@@ -249,7 +349,6 @@ export async function exportZIP(ctx: {
         claimedMeta.beat,
         sealedStepIndex,
         String(claimedMeta.chakraDay ?? ""),
-        // readIntentionSigil expects a SigilPayload
         readIntentionSigil(toSigilPayloadStrict(claimedMeta, sealedStepIndex))
       )
     );
@@ -289,17 +388,17 @@ export async function exportZIP(ctx: {
       ...claimedMetaCanon,
       stepsPerBeat: stepsNum,
       shareUrl: fullUrlForManifest, // hint for consumers
-      fullUrl: fullUrlForManifest,  // alias
+      fullUrl: fullUrlForManifest, // alias
     };
     putMetadata(svgEl, metaForSvg);
 
     // Display-only exposure (non-canonical marker)
     try {
       svgEl.setAttribute("data-step-index", String(sealedStepIndex));
-      const NS = "http://www.w3.org/2000/svg";
+      const NS_SVG = "http://www.w3.org/2000/svg";
       let dispMeta = svgEl.querySelector("metadata#sigil-display");
       if (!dispMeta) {
-        dispMeta = document.createElementNS(NS, "metadata");
+        dispMeta = document.createElementNS(NS_SVG, "metadata");
         dispMeta.setAttribute("id", "sigil-display");
         dispMeta.setAttribute("data-noncanonical", "1");
         svgEl.appendChild(dispMeta);
@@ -317,7 +416,7 @@ export async function exportZIP(ctx: {
     retagSvgIdsForStep(svgEl, claimedMetaCanon.pulse, claimedMetaCanon.beat, sealedStepIndex);
     ensureCanonicalMetadataFirst(svgEl);
 
-    // Update ALL URL surfaces inside the SVG to the canonical manifest URL
+    // Update ALL URL surfaces inside the SVG to the canonical manifest URL.
     updateSvgUrlSurfaces(svgEl, fullUrlForManifest);
 
     // Extract URL bits for the manifest file
@@ -333,78 +432,266 @@ export async function exportZIP(ctx: {
     }
 
     // Create artifacts
-    const svgBlob = await svgBlobForExport(svgEl, EXPORT_PX, {
-      metaOverride: metaForSvg, // includes shareUrl/fullUrl
-      addQR: false,
-      addPulseBar: false,
-      title: "Kairos Sigil-Glyph — Sealed KairosMoment",
-      desc: "Deterministic sigil-glyph with sovereign metadata. Exported as archived key.",
-    });
-    const pngBlob = await pngBlobFromSvg(svgBlob, EXPORT_PX);
-    const svgHash = await sha256HexCanon(new Uint8Array(await svgBlob.arrayBuffer()));
+    const chakraNormalized = normalizeChakraDay(String(claimedMetaCanon.chakraDay ?? ""));
+    if (!chakraNormalized) throw new Error("Chakra day missing from SVG.");
+
+    const payloadHashHex = canonicalLower;
+    if (!payloadHashHex) throw new Error("Payload hash missing from SVG.");
+
+    const sharePayload: SigilSharePayload = {
+      pulse: claimedMetaCanon.pulse,
+      beat: claimedMetaCanon.beat,
+      stepIndex: sealedStepIndex,
+      chakraDay: chakraNormalized,
+      stepsPerBeat: stepsNum,
+      kaiSignature: claimedMetaCanon.kaiSignature ?? undefined,
+      userPhiKey: claimedMetaCanon.userPhiKey ?? undefined,
+    };
+    const shareUrl = fullUrlForManifest || makeSigilUrl(payloadHashHex, sharePayload);
+    const verifierUrl = buildVerifierUrl(claimedMetaCanon.pulse, claimedMetaCanon.kaiSignature ?? "");
+    const kaiSignature = claimedMetaCanon.kaiSignature ?? "";
+    const phiKey = claimedMetaCanon.userPhiKey ?? "";
+    if (!kaiSignature) throw new Error("Export failed: kaiSignature missing from SVG.");
+    if (!phiKey) throw new Error("Export failed: Φ-Key missing from SVG.");
+
+    const kaiSignatureShort = kaiSignature.slice(0, 10);
+    const proofCapsule: ProofCapsuleV1 = {
+      v: "KPV-1",
+      pulse: claimedMetaCanon.pulse,
+      chakraDay: chakraNormalized,
+      kaiSignature,
+      phiKey,
+      verifierSlug: `${claimedMetaCanon.pulse}-${kaiSignatureShort}`,
+    };
+    const base = `☤KAI-Sigil_Glyph_v1_${(localHash || routeHash || "mint").slice(0, 16)}_${payload.pulse}_${kaiSignatureShort}_Φkey${phiKey}`;
+    const capsuleHash = await hashProofCapsuleV1(proofCapsule);
+
+    const pxCandidates: readonly number[] = isIOS()
+      ? EXPORT_PX_CANDIDATES_IOS
+      : isLikelyMobile()
+        ? EXPORT_PX_CANDIDATES_MOBILE_GENERIC
+        : EXPORT_PX_CANDIDATES_DESKTOP;
+
+    const svgClone = svgEl.cloneNode(true) as SVGElement;
+    ensureViewBoxOnClone(svgClone as SVGSVGElement, pxCandidates[0] ?? 4096);
+    ensureXmlns(svgClone as SVGSVGElement);
+    ensureTitleAndDesc(
+      svgClone as SVGSVGElement,
+      "Kairos Sigil-Glyph — Sealed KairosMoment",
+      "Deterministic sigil-glyph with sovereign metadata. Exported as archived key."
+    );
+
+    svgClone.setAttribute("data-pulse", String(claimedMetaCanon.pulse));
+    svgClone.setAttribute("data-beat", String(claimedMetaCanon.beat));
+    svgClone.setAttribute("data-step-index", String(sealedStepIndex));
+    svgClone.setAttribute("data-chakra-day", chakraNormalized);
+    svgClone.setAttribute("data-steps-per-beat", String(stepsNum));
+    svgClone.setAttribute("data-kai-signature", kaiSignature);
+    svgClone.setAttribute("data-phi-key", phiKey);
+    svgClone.setAttribute("data-payload-hash", payloadHashHex);
+
+    const svgString = new XMLSerializer().serializeToString(svgClone);
+
+    const embeddedMeta = extractEmbeddedMetaFromSvg(svgString);
+    let zkPoseidonHash =
+      typeof embeddedMeta.zkPoseidonHash === "string" && embeddedMeta.zkPoseidonHash.trim().length > 0
+        ? embeddedMeta.zkPoseidonHash.trim()
+        : undefined;
+    let zkProof = embeddedMeta.zkProof;
+    let proofHints = embeddedMeta.proofHints;
+    let zkPublicInputs: unknown = embeddedMeta.zkPublicInputs;
+
+    const allowMissingProof = typeof navigator !== "undefined" && navigator.onLine === false;
+
+    if (!zkPoseidonHash && payloadHashHex) {
+      const computed = await computeZkPoseidonHash(payloadHashHex);
+      zkPoseidonHash = computed.hash;
+    }
+
+    if (zkPoseidonHash) {
+      const proofObj =
+        zkProof && typeof zkProof === "object" ? (zkProof as Record<string, unknown>) : null;
+
+      const hasProof =
+        typeof zkProof === "string"
+          ? zkProof.trim().length > 0
+          : Array.isArray(zkProof)
+            ? zkProof.length > 0
+            : proofObj
+              ? Object.keys(proofObj).length > 0
+              : false;
+
+      let secretForProof: string | undefined;
+      if (payloadHashHex) {
+        const computed = await computeZkPoseidonHash(payloadHashHex);
+        if (computed.hash === zkPoseidonHash) {
+          secretForProof = computed.secret;
+        }
+      }
+
+      if (!hasProof && !secretForProof) {
+        if (!allowMissingProof) throw new Error("ZK secret missing for proof generation");
+      }
+
+      if (!hasProof && secretForProof) {
+        const generated = await generateZkProofFromPoseidonHash({
+          poseidonHash: zkPoseidonHash,
+          secret: secretForProof,
+          proofHints:
+            typeof proofHints === "object" && proofHints !== null
+              ? (proofHints as SigilProofHints)
+              : undefined,
+        });
+        if (!generated) {
+          if (!allowMissingProof) throw new Error("ZK proof generation failed");
+        } else {
+          zkProof = generated.proof;
+          proofHints = generated.proofHints;
+          zkPublicInputs = generated.zkPublicInputs;
+        }
+      }
+
+      if (typeof proofHints !== "object" || proofHints === null) {
+        proofHints = buildProofHints(zkPoseidonHash);
+      } else {
+        proofHints = buildProofHints(zkPoseidonHash, proofHints as SigilProofHints);
+      }
+    }
+
+    if (zkPoseidonHash && zkPublicInputs) {
+      const publicInput0 = readPublicInput0(zkPublicInputs);
+      if (publicInput0 && publicInput0 !== zkPoseidonHash) throw new Error("Embedded ZK mismatch");
+    }
+    if (zkPoseidonHash && (!zkProof || typeof zkProof !== "object")) {
+      if (!allowMissingProof) throw new Error("ZK proof missing");
+    }
+
+    if (zkPublicInputs) {
+      svgClone.setAttribute("data-zk-public-inputs", JSON.stringify(zkPublicInputs));
+    }
+    if (zkPoseidonHash) {
+      svgClone.setAttribute("data-zk-scheme", "groth16-poseidon");
+      svgClone.setAttribute("data-zk-poseidon-hash", zkPoseidonHash);
+      if (zkProof) svgClone.setAttribute("data-zk-proof", "present");
+    }
+
+    if (
+      svgClone.getAttribute("data-pulse") !== String(claimedMetaCanon.pulse) ||
+      svgClone.getAttribute("data-kai-signature") !== kaiSignature ||
+      svgClone.getAttribute("data-phi-key") !== phiKey
+    ) {
+      throw new Error("SVG data attributes do not match proof capsule");
+    }
+
+    const svgHash = await hashSvgText(svgString);
+
+    const proofBundleBase = {
+      hashAlg: PROOF_HASH_ALG,
+      canon: PROOF_CANON,
+      proofCapsule,
+      capsuleHash,
+      svgHash,
+      shareUrl,
+      verifierUrl,
+      authorSig: null,
+      zkPoseidonHash,
+      zkProof,
+      proofHints,
+      zkPublicInputs,
+    };
+
+    const bundleUnsigned = buildBundleUnsigned(proofBundleBase);
+    const computedBundleHash = await hashBundle(bundleUnsigned);
+
+    const proofBundle = {
+      ...proofBundleBase,
+      bundleHash: computedBundleHash,
+      authorSig: null,
+    };
+
+    const sealedSvg = embedProofMetadata(svgString, proofBundle);
+    const svgBlob = new Blob([sealedSvg], { type: "image/svg+xml;charset=utf-8" });
+
+    const svgAssetHash = await sha256HexCanon(new Uint8Array(await svgBlob.arrayBuffer()));
+
+    // ✅ PNG export: try biggest -> shrink until iOS can render reliably
+    const { pngBlob, usedPxMax } = await pngBlobFromSvgBestFit(svgBlob, pxCandidates);
     const pngHash = await sha256HexCanon(new Uint8Array(await pngBlob.arrayBuffer()));
 
-    // Build ZIP (add manifest before generate)
+    // Build ZIP
     const JSZip = await loadJSZip();
     const zip = new JSZip();
-    zip.file(`${base}.svg`, svgBlob);
+
+    // PNG first (harmless, sometimes helps unzip apps)
     zip.file(`${base}.png`, pngBlob);
+    zip.file(`${base}.svg`, svgBlob);
+
+    zip.file(`${base}.payload.json`, JSON.stringify(metaForSvg, null, 2));
+    zip.file(`${base}.url.txt`, fullUrlForManifest);
+
+    zip.file(`${base}.proof_bundle.json`, JSON.stringify(proofBundle, null, 2));
 
     const manifestPayload = {
       hashAlg: "sha256",
       canon: "sorted keys + UTF-8 + no whitespace",
-      // ids
+
       hash: localHash || routeHash || "",
       canonicalHash: claimedMetaCanon.canonicalHash ?? null,
-      // moment (sealed)
+
       pulse: claimedMetaCanon.pulse,
       beat: claimedMetaCanon.beat,
       stepIndex: sealedStepIndex,
       atStepIndex: claimStepIndex,
       chakraDay: claimedMetaCanon.chakraDay ?? null,
-      // ownership
+
       userPhiKey: claimedMetaCanon.userPhiKey ?? null,
       kaiSignature: claimedMetaCanon.kaiSignature ?? null,
       transferNonce: claimedMetaCanon.transferNonce ?? null,
-      // timing
+
       expiresAtPulse: claimedMetaCanon.expiresAtPulse ?? null,
       exportedAtPulse: claimedMetaCanon.exportedAtPulse ?? null,
       claimedAtPulse: nowPulse,
-      // overlays
+
       overlays: { qr: false, eternalPulseBar: false },
       assets: {
-        [`${base}.svg`]: svgHash,
+        [`${base}.svg`]: svgAssetHash,
         [`${base}.png`]: pngHash,
       },
-      // claim controls
+
+      pngPxMax: usedPxMax,
+
       claimExtendUnit: claimedMetaCanon.claimExtendUnit ?? null,
       claimExtendAmount: claimedMetaCanon.claimExtendAmount ?? null,
-      // canonical share refs
+
       fullUrl: fullUrlForManifest,
       p: pValue,
       urlQuery: { p: pValue, t: tValue },
+
+      proofBundleHash: computedBundleHash,
+      proofBundle,
     };
+
     const manifestHash = await sha256HexCanon(stableStringify(manifestPayload));
     const manifest = { ...manifestPayload, manifestHash };
     zip.file(`${base}.manifest.json`, JSON.stringify(manifest, null, 2));
 
-    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const zipBlob = await zip.generateAsync({
+      type: "blob",
+      mimeType: "application/zip",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+      streamFiles: true,
+    });
 
-    // Download
-    const dlUrl = URL.createObjectURL(zipBlob);
-    const a = document.createElement("a");
-    a.href = dlUrl;
-    a.download = `${base}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    requestAnimationFrame(() => URL.revokeObjectURL(dlUrl));
+    // ✅ Keep the same UX: direct download via <a>, but iOS-safe (no immediate revoke)
+    downloadBlobAsFile(zipBlob, `${base}.zip`);
 
     signal(setToast, "Access key generated");
   } catch (e) {
+    const msg = e instanceof Error ? e.message : "Claim failed";
     // eslint-disable-next-line no-console
     console.error(e);
-    signal(setToast, "Claim failed");
+    signal(setToast, `Claim failed: ${msg}`);
   } finally {
     setExporting(false);
   }

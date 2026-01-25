@@ -36,6 +36,7 @@ import type { EmbeddedMediaResult } from "./SignatureEmbedder";
 import MultiShareDispatcher from "./MultiShareDispatcher";
 import { buildNextSigilSvg, downloadSigil } from "./SigilMemoryBuilder";
 import { embedProofMetadata } from "../../utils/svgProof";
+import { isReloadDebugEnabled } from "../../utils/reloadDetective";
 
 /* Verifier UI + proof helpers */
 import VerifierFrame from "./VerifierFrame";
@@ -58,6 +59,7 @@ import { derivePhiKeyFromSig } from "../VerifierStamper/sigilUtils";
 /* Kai-Klok φ-engine (KKS v1) */
 import { fetchKaiOrLocal, epochMsFromPulse, type ChakraDay } from "../../utils/kai_pulse";
 import type { AuthorSig } from "../../utils/authorSig";
+import { registerSigilAuth } from "../../utils/sigilRegistry";
 import { ensurePasskey, signBundleHash } from "../../utils/webauthnKAS";
 import { computeZkPoseidonHash } from "../../utils/kai";
 import { buildProofHints, generateZkProofFromPoseidonHash } from "../../utils/zkProof";
@@ -542,6 +544,25 @@ function KaiVohFlow(): ReactElement {
     return Object.keys(session.connectedAccounts).length > 0;
   }, [session]);
 
+  useEffect(() => {
+    if (!isReloadDebugEnabled()) return;
+    // eslint-disable-next-line no-console
+    console.log("[Reload Detective] KaiVohFlow mount");
+    return () => {
+      // eslint-disable-next-line no-console
+      console.log("[Reload Detective] KaiVohFlow unmount");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session || step !== "login") return;
+    if (Object.keys(session.connectedAccounts ?? {}).length > 0) {
+      setStep("compose");
+    } else {
+      setStep("connect");
+    }
+  }, [session, step]);
+
   /* ---------------------------------------------------------------------- */
   /*                          Session + Sigil Handling                      */
   /* ---------------------------------------------------------------------- */
@@ -814,14 +835,20 @@ function KaiVohFlow(): ReactElement {
             await ensurePasskey(proofPhiKey);
             authorSig = await signBundleHash(proofPhiKey, bundleHash);
           } catch (err) {
-            console.warn("Author signature failed; continuing without authorSig.", err);
-            authorSig = null;
+            const reason = err instanceof Error ? err.message : String(err);
+            throw new Error(
+              `KAS signature failed. Please complete Face ID/Touch ID and ensure this PWA opens on the same hostname you registered. Details: ${reason}`
+            );
           }
           const proofBundle = {
             ...proofBundleBase,
             bundleHash,
             authorSig,
           };
+          if (authorSig?.v === "KAS-1") {
+            const authUrl = shareUrl || verifierUrl;
+            if (authUrl) registerSigilAuth(authUrl, authorSig);
+          }
 
           content = await embedProofMetadataIntoSvgBlob(content, proofBundle);
         }
