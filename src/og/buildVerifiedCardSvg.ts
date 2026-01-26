@@ -2,9 +2,11 @@ import phiSvg from "../assets/phi.svg?raw";
 import type { VerifiedCardData } from "./types";
 import { sanitizeSigilSvg, svgToDataUri } from "./sigilEmbed";
 import { currency as fmtPhi, usd as fmtUsd } from "../components/valuation/display";
+import { buildProofOfBreathSeal } from "./proofOfBreathSeal";
 
-const WIDTH = 1200;
-const HEIGHT = 630;
+export const VERIFIED_CARD_W = 1200;
+export const VERIFIED_CARD_H = 630;
+const PHI = (1 + Math.sqrt(5)) / 2;
 const phiLogoDataUri = svgToDataUri(phiSvg);
 
 function hashStringToInt(value: string): number {
@@ -32,13 +34,44 @@ function shortPhiKey(phiKey: string): string {
 
 function badgeMark(ok: boolean): string {
   if (ok) {
-    return "M20 34 L28 42 L44 20";
+    return "M18 32 L28 42 L46 18";
   }
   return "M20 20 L44 44 M44 20 L20 44";
 }
 
-function headerCheckPath(): string {
-  return "M16 26 L26 36 L44 16";
+type TextMetricsLite = { width: number; ascent: number; descent: number };
+
+function measureTextMetrics(
+  text: string,
+  font: string,
+  fontPx: number,
+  letterSpacingEm = 0,
+): TextMetricsLite {
+  let width = text.length * fontPx * 0.6;
+  let ascent = fontPx * 0.8;
+  let descent = fontPx * 0.2;
+
+  let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
+  if (typeof OffscreenCanvas !== "undefined") {
+    ctx = new OffscreenCanvas(1, 1).getContext("2d");
+  } else if (typeof document !== "undefined") {
+    const canvas = document.createElement("canvas");
+    ctx = canvas.getContext("2d");
+  }
+
+  if (ctx) {
+    ctx.font = font;
+    const metrics = ctx.measureText(text);
+    width = metrics.width;
+    ascent = metrics.actualBoundingBoxAscent || ascent;
+    descent = metrics.actualBoundingBoxDescent || descent;
+  }
+
+  if (letterSpacingEm > 0 && text.length > 1) {
+    width += (text.length - 1) * letterSpacingEm * fontPx;
+  }
+
+  return { width, ascent, descent };
 }
 
 function dropUndefined<T extends Record<string, unknown>>(value: T): T {
@@ -59,16 +92,16 @@ function formatUsdValue(value: number | null | undefined): string {
 function sigilImageMarkup(sigilSvg: string | undefined, clipId: string): string {
   if (!sigilSvg) {
     return `
-      <rect x="840" y="210" width="300" height="300" rx="28" fill="rgba(10,14,20,0.6)" />
-      <text x="990" y="370" text-anchor="middle" font-size="24" font-weight="700" fill="#B7C6E3">Sigil unavailable</text>
+      <rect x="810" y="150" width="320" height="320" rx="26" fill="rgba(14,16,20,0.7)" stroke="rgba(255,255,255,0.08)" />
+      <text x="970" y="330" text-anchor="middle" font-size="22" font-weight="600" fill="#C9D4E8">Sigil unavailable</text>
     `;
   }
   const sanitized = sanitizeSigilSvg(sigilSvg);
   const dataUri = svgToDataUri(sanitized);
   return `
     <image
-      x="840" y="210"
-      width="300" height="300"
+      x="810" y="150"
+      width="320" height="320"
       href="${dataUri}"
       preserveAspectRatio="xMidYMid meet"
       clip-path="url(#${clipId})"
@@ -76,26 +109,117 @@ function sigilImageMarkup(sigilSvg: string | undefined, clipId: string): string 
   `;
 }
 
+function qrImageMarkup(qrDataUrl: string | undefined, clipId: string, x: number, y: number): string {
+  if (!qrDataUrl) {
+    return `
+      <rect x="${x}" y="${y}" width="264" height="124" rx="16" fill="rgba(10,12,18,0.7)" stroke="rgba(255,255,255,0.08)" />
+      <text x="${x + 132}" y="${y + 72}" text-anchor="middle" font-size="18" font-weight="600" fill="#B7C6E3">QR unavailable</text>
+    `;
+  }
+  return `
+    <image
+      x="${x + 16}" y="${y + 8}"
+      width="232" height="108"
+      href="${qrDataUrl}"
+      preserveAspectRatio="xMidYMid meet"
+      clip-path="url(#${clipId})"
+    />
+  `;
+}
+
+function shortHash(value: string | undefined, head = 10, tail = 8): string {
+  if (!value) return "—";
+  if (value.length <= head + tail + 2) return value;
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+function sealPlacement(seedValue: string): { x: number; y: number; rotation: number; dash: string } {
+  const hash = hashStringToInt(seedValue);
+  const offsetX = (hash % 48) - 24;
+  const offsetY = ((hash >> 6) % 24) - 12;
+  const rotation = ((hash % 41) - 20) * 0.5;
+  const dashA = 4 + (hash % 5);
+  const dashB = 3 + ((hash >> 3) % 4);
+  return { x: 1008 + offsetX, y: 92 + offsetY, rotation, dash: `${dashA} ${dashB}` };
+}
+
+function sealBrandIcon(x: number, y: number, palette: { primary: string; accent: string }): string {
+  return `
+    <g transform="translate(${x} ${y})">
+      <circle cx="0" cy="0" r="6" fill="none" stroke="${palette.primary}" stroke-width="1.2" />
+      <circle cx="0" cy="0" r="1.8" fill="${palette.accent}" />
+    </g>
+  `;
+}
+
+function ornamentMarkup(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  palette: { primary: string; secondary: string; accent: string },
+  geometry: { tickCount: number; polygonSides: number },
+): string {
+  const inset = 16;
+  const left = x + inset;
+  const right = x + width - inset;
+  const top = y + inset;
+  const bottom = y + height - inset;
+  const cx = x + width - inset - 24;
+  const cy = y + inset + 24;
+  const ticks = Array.from({ length: Math.min(geometry.tickCount, 18) }).map((_, idx) => {
+    const t = (idx / Math.min(geometry.tickCount, 18)) * Math.PI * 0.6 + Math.PI * 1.2;
+    const inner = 18;
+    const outer = 26;
+    const x1 = cx + Math.cos(t) * inner;
+    const y1 = cy + Math.sin(t) * inner;
+    const x2 = cx + Math.cos(t) * outer;
+    const y2 = cy + Math.sin(t) * outer;
+    return `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${palette.accent}" stroke-width="0.9" opacity="0.5" />`;
+  });
+  const poly = Array.from({ length: geometry.polygonSides }).map((_, idx) => {
+    const t = (idx / geometry.polygonSides) * Math.PI * 2 - Math.PI / 2;
+    const px = cx + Math.cos(t) * 12;
+    const py = cy + Math.sin(t) * 12;
+    return `${idx === 0 ? "M" : "L"}${px.toFixed(2)} ${py.toFixed(2)}`;
+  });
+  return `
+    <g opacity="0.6">
+      <path d="M ${left} ${top} L ${left + 36} ${top} L ${left + 46} ${top + 10}" stroke="${palette.secondary}" stroke-width="1" fill="none" />
+      <path d="M ${right} ${bottom} L ${right - 32} ${bottom} L ${right - 42} ${bottom - 12}" stroke="${palette.secondary}" stroke-width="1" fill="none" />
+      <circle cx="${cx}" cy="${cy}" r="20" fill="none" stroke="${palette.primary}" stroke-width="1" opacity="0.5" />
+      ${ticks.join("\n")}
+      <path d="${poly.join(" ")} Z" fill="none" stroke="${palette.primary}" stroke-width="0.9" opacity="0.55" />
+    </g>
+  `;
+}
+
 export function buildVerifiedCardSvg(data: VerifiedCardData): string {
-  const { capsuleHash, verifiedAtPulse, phikey, kasOk, g16Ok, sigilSvg } = data;
+  const { capsuleHash, verifiedAtPulse, phikey, kasOk, g16Ok, sigilSvg, qrDataUrl, svgHash, receiptHash } = data;
   const { accent, accentSoft, accentGlow } = accentFromHash(capsuleHash);
   const id = `og-${hashStringToInt(capsuleHash).toString(16)}`;
   const sigilClipId = `${id}-sigil-clip`;
+  const qrClipId = `${id}-qr-clip`;
   const ringGradientId = `${id}-ring`;
   const glowId = `${id}-glow`;
   const waveId = `${id}-wave`;
   const badgeGlowId = `${id}-badge-glow`;
+  const sealId = `${id}-seal`;
+  const hasKas = typeof kasOk === "boolean";
+  const sealSeed = `${capsuleHash}|${svgHash ?? ""}|${verifiedAtPulse}`;
+  const seal = sealPlacement(sealSeed);
 
   const phiShort = shortPhiKey(phikey);
-  const valuationSnapshot = data.valuation ? { ...data.valuation } : undefined;
+  const valuationSnapshot = data.valuation ? { ...data.valuation } : data.receipt?.valuation ? { ...data.receipt.valuation } : undefined;
   if (valuationSnapshot && "valuationHash" in valuationSnapshot) {
     delete (valuationSnapshot as { valuationHash?: string }).valuationHash;
   }
   const valuationHash = data.valuation?.valuationHash ?? data.receipt?.valuationHash;
   const valuationPhi = formatPhiValue(valuationSnapshot?.phiValue);
   const valuationUsd = formatUsdValue(valuationSnapshot?.usdValue);
-  const valuationModeLabel =
-    valuationSnapshot?.mode === "receive" ? "RECEIVE" : valuationSnapshot?.mode === "origin" ? "ORIGIN" : null;
+  const isReceiveMode = valuationSnapshot?.mode === "receive";
+  const valuationModeLabel = isReceiveMode ? "RECEIVE" : "ORIGIN";
+  const headlineText = isReceiveMode ? "VERIFIED RECEIVE" : "VERIFIED ORIGIN";
 
   const receiptPayload =
     data.receipt ??
@@ -110,11 +234,11 @@ export function buildVerifiedCardSvg(data: VerifiedCardData): string {
         }
       : undefined);
   const receiptMeta: Record<string, unknown> = {};
-  const bundleHash = receiptPayload?.bundleHash ?? data.bundleHash;
+  const bundleHashValue = receiptPayload?.bundleHash ?? data.bundleHash;
   const zkPoseidonHash = receiptPayload?.zkPoseidonHash ?? data.zkPoseidonHash;
   const verifier = receiptPayload?.verifier ?? data.verifier;
   const verificationVersion = receiptPayload?.verificationVersion ?? data.verificationVersion;
-  if (bundleHash) receiptMeta.bundleHash = bundleHash;
+  if (bundleHashValue) receiptMeta.bundleHash = bundleHashValue;
   if (zkPoseidonHash) receiptMeta.zkPoseidonHash = zkPoseidonHash;
   if (verifier) receiptMeta.verifier = verifier;
   if (verificationVersion) receiptMeta.verificationVersion = verificationVersion;
@@ -124,29 +248,109 @@ export function buildVerifiedCardSvg(data: VerifiedCardData): string {
   if (data.verificationSig) receiptMeta.verificationSig = data.verificationSig;
   const receiptJson = JSON.stringify(receiptMeta);
 
+  const proofSeal = buildProofOfBreathSeal({
+    bundleHash: bundleHashValue,
+    capsuleHash,
+    svgHash,
+    receiptHash,
+    pulse: verifiedAtPulse,
+  });
+
   const auditMeta = dropUndefined({
     receiptHash: data.receiptHash,
     valuation: valuationSnapshot,
     valuationHash,
-    bundleHash,
+    bundleHash: bundleHashValue,
     zkPoseidonHash,
     verifiedAtPulse: receiptPayload?.verifiedAtPulse ?? verifiedAtPulse,
   });
   const auditJson = JSON.stringify(auditMeta);
 
+  const proofSealLabel = "PROOF OF BREATH™";
+  const proofSealMicro = `${shortHash(capsuleHash, 6, 4)} · ${shortHash(bundleHashValue, 6, 4)}`;
+  const proofSealSizeDefault = 240;
+  const proofSealRadiusDefault = Math.floor(proofSealSizeDefault / 2);
+  const proofSealRadiusMin = 120;
+  const proofSealXDefault = 600;
+  const proofSealY = 312;
+  const sigilFrameX = 796;
+  const sigilFrameY = 136;
+  const sigilFrameSize = 348;
+  const unit = 22;
+  const phiGap = Math.round(unit * PHI);
+  const titleY = 134;
+  const subheadY = titleY + 42;
+  const modeLabelY = subheadY + 34;
+  const badgeLabelY = modeLabelY + Math.round(unit * 2.15);
+  const valueLabelY = badgeLabelY + phiGap;
+  const valueY = valueLabelY + Math.round(unit * 1.4);
+  const usdLabelY = valueY + phiGap;
+  const usdValueY = usdLabelY + Math.round(unit * 1.4);
+  const qrBoxX = 128;
+  const qrBoxY = usdValueY + Math.round(phiGap * 0.45);
+  const qrBoxW = 288;
+  const qrBoxH = 140;
+  const brandX = VERIFIED_CARD_W / 2;
+  const brandY = 78;
+  const brandText = "SIGIL-SEAL";
+  const brandFontPx = 14;
+  const brandLetterSpacingEm = 0.42;
+  const brandFont = `600 ${brandFontPx}px Inter, "Segoe UI", "Helvetica Neue", Arial, sans-serif`;
+  const brandMetrics = measureTextMetrics(brandText, brandFont, brandFontPx, brandLetterSpacingEm);
+  const brandIconSize = 12;
+  const brandIconGap = Math.round(brandFontPx * 0.6);
+  const brandGroupWidth = brandMetrics.width + brandIconSize + brandIconGap;
+  const brandTextX = brandX - brandGroupWidth / 2 + brandIconSize + brandIconGap;
+  const brandIconX = brandX - brandGroupWidth / 2 + brandIconSize / 2;
+  const labelFontPx = 22;
+  const labelLetterSpacingEm = 0.08;
+  const labelFont = `700 ${labelFontPx}px Inter, "Segoe UI", "Helvetica Neue", Arial, sans-serif`;
+  const g16LabelX = hasKas ? 470 : 320;
+  const g16Metrics = measureTextMetrics("G16", labelFont, labelFontPx, labelLetterSpacingEm);
+  const g16BadgeSize = Math.round(labelFontPx * 1.25);
+  const g16BadgeGap = Math.round(labelFontPx * 0.45);
+  const g16BadgeX = g16LabelX + g16Metrics.width + g16BadgeGap;
+  const g16BadgeY = badgeLabelY - Math.round(Math.max(g16Metrics.ascent * 0.9, g16BadgeSize * 0.85));
+  const g16BadgeRadius = Math.round(g16BadgeSize * 0.26);
+  const g16BadgeStroke = Math.max(1.4, g16BadgeSize * 0.033);
+  const g16MarkScale = (g16BadgeSize / 54) * 0.5;
+  const g16MarkTranslate = (g16BadgeSize / 54) * 13.5;
+  const valueFontPx = 30;
+  const valueFont = `700 ${valueFontPx}px Inter, "Segoe UI", "Helvetica Neue", Arial, sans-serif`;
+  const valueMetrics = measureTextMetrics(valuationPhi, valueFont, valueFontPx);
+  const usdMetrics = measureTextMetrics(valuationUsd, valueFont, valueFontPx);
+  const leftValueRightEdge = 320 + Math.max(valueMetrics.width, usdMetrics.width);
+  const safeGap = 24;
+  const badgeLeftBound = leftValueRightEdge + safeGap;
+  let proofSealX = proofSealXDefault;
+  let allowedRadius = proofSealX - badgeLeftBound;
+  let proofSealRadius = Math.min(proofSealRadiusDefault, allowedRadius);
+  if (proofSealRadius < proofSealRadiusMin) {
+    const neededShift = Math.min(24, proofSealRadiusMin - proofSealRadius);
+    proofSealX += neededShift;
+    allowedRadius = proofSealX - badgeLeftBound;
+    proofSealRadius = Math.min(proofSealRadiusDefault, allowedRadius);
+  }
+  proofSealRadius = Math.max(0, proofSealRadius);
+  const proofSealSize = proofSealRadius * 2;
+  const proofSealMarkup = proofSeal.toSvg(proofSealX, proofSealY, proofSealSize, id, proofSealLabel, proofSealMicro);
+  const phiKeyLabelY = Math.round(proofSealY + proofSealSize / 2 + phiGap * 0.7);
+  const phiKeyValueY = phiKeyLabelY + Math.round(unit * 1.9);
+  const brandPalette = proofSeal.palette;
+  const ornament = ornamentMarkup(810, 150, 320, 320, brandPalette, proofSeal.geometry);
   return `
-<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${VERIFIED_CARD_W}" height="${VERIFIED_CARD_H}" viewBox="0 0 ${VERIFIED_CARD_W} ${VERIFIED_CARD_H}">
   <metadata id="kai-verified-receipt"><![CDATA[${receiptJson}]]></metadata>
   <metadata id="kai-verified-audit"><![CDATA[${auditJson}]]></metadata>
   <defs>
-    <linearGradient id="${id}-bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#05060A" />
-      <stop offset="55%" stop-color="#07080C" />
-      <stop offset="100%" stop-color="#0B1222" />
+    <linearGradient id="${id}-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0E1118" />
+      <stop offset="55%" stop-color="#0B0E14" />
+      <stop offset="100%" stop-color="#141B26" />
     </linearGradient>
     <linearGradient id="${ringGradientId}" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="${accent}" stop-opacity="0.95" />
-      <stop offset="50%" stop-color="#5fe3ff" stop-opacity="0.45" />
+      <stop offset="50%" stop-color="#9fe2ff" stop-opacity="0.45" />
       <stop offset="100%" stop-color="${accentSoft}" stop-opacity="0.85" />
     </linearGradient>
     <radialGradient id="${waveId}" cx="0.9" cy="0.2" r="0.8">
@@ -168,79 +372,109 @@ export function buildVerifiedCardSvg(data: VerifiedCardData): string {
         <feMergeNode in="SourceGraphic" />
       </feMerge>
     </filter>
-    <clipPath id="${sigilClipId}">
-      <rect x="840" y="210" width="300" height="300" rx="28" />
+  <clipPath id="${sigilClipId}">
+      <rect x="810" y="150" width="320" height="320" rx="26" />
+    </clipPath>
+    <clipPath id="${qrClipId}">
+      <rect x="${qrBoxX + 12}" y="${qrBoxY + 8}" width="264" height="124" rx="16" />
     </clipPath>
     <style>
-      .headline { font: 800 72px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #EEF2FF; }
-      .subhead { font: 600 30px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #DDE6FF; }
-      .phikey { font: 700 44px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #EEF2FF; }
-      .label { font: 800 34px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #DDE6FF; }
-      .value { font: 700 28px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #EEF2FF; }
-      .mode-label { font: 800 22px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #9FE7FF; letter-spacing: 0.08em; }
-      .footer { font: 700 30px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #EEF2FF; }
-      .footer-right { font: 600 22px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #B9C7E6; }
+      .headline { font: 800 56px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; letter-spacing: 0.12em; fill: #F4F6FB; }
+      .subhead { font: 600 26px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #DEE6F5; }
+      .phikey { font: 700 38px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #F2F5FB; }
+      .label { font: 700 22px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #C4D0E6; letter-spacing: 0.08em; }
+      .value { font: 700 30px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #F2F5FB; }
+      .mode-label { font: 800 18px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #94BCEB; letter-spacing: 0.24em; }
+      .micro { font: 500 12px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #8FA3C5; letter-spacing: 0.12em; }
+      .brand { font: 600 14px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; fill: #9FB5DA; letter-spacing: 0.42em; }
+      .seal { font: 700 16px "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; letter-spacing: 0.24em; }
     </style>
   </defs>
 
-  <rect width="${WIDTH}" height="${HEIGHT}" fill="url(#${id}-bg)" />
+  <rect width="${VERIFIED_CARD_W}" height="${VERIFIED_CARD_H}" fill="url(#${id}-bg)" />
 
-  <rect x="0" y="0" width="${WIDTH}" height="${HEIGHT}" fill="url(#${waveId})" opacity="0.35" />
+  <rect x="0" y="0" width="${VERIFIED_CARD_W}" height="${VERIFIED_CARD_H}" fill="url(#${waveId})" opacity="0.25" />
 
-  <g opacity="0.18" stroke="#C9D6FF" stroke-width="1" fill="none">
-    <path d="M620 120 C 760 60 960 90 1140 40" />
-    <path d="M640 200 C 760 140 980 170 1160 120" />
-    <path d="M660 280 C 820 240 1020 250 1180 210" />
-    <path d="M680 360 C 850 330 1040 330 1200 300" />
-    <path d="M700 440 C 870 420 1040 420 1200 410" />
+  <rect x="26" y="26" width="1148" height="578" rx="26" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1.8" />
+  <rect x="40" y="40" width="1120" height="550" rx="22" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="1.2" />
+
+  <g opacity="0.12" stroke="#C9D6FF" stroke-width="1" fill="none">
+    <path d="M420 120 C 560 60 760 90 980 40" />
+    <path d="M440 200 C 560 140 780 170 1000 120" />
+    <path d="M460 280 C 640 240 820 250 1040 210" />
+    <path d="M480 360 C 670 330 860 330 1080 300" />
+    <path d="M500 440 C 690 420 860 420 1100 410" />
   </g>
 
-  <circle cx="240" cy="315" r="172" fill="none" stroke="url(#${ringGradientId})" stroke-width="8" filter="url(#${glowId})" />
-  <circle cx="240" cy="315" r="135" fill="rgba(11,15,24,0.92)" stroke="rgba(255,255,255,0.05)" />
+  <circle cx="220" cy="220" r="92" fill="none" stroke="url(#${ringGradientId})" stroke-width="6" filter="url(#${glowId})" />
+  <circle cx="220" cy="220" r="72" fill="rgba(11,14,20,0.85)" stroke="rgba(255,255,255,0.08)" />
   <image
-    x="160" y="235"
-    width="160" height="160"
+    x="180" y="180"
+    width="80" height="80"
     href="${phiLogoDataUri}"
     preserveAspectRatio="xMidYMid meet"
   />
 
-  <text class="headline" x="420" y="120">VERIFIED</text>
-  ${valuationModeLabel ? `<text class="mode-label" x="420" y="155">${valuationModeLabel}</text>` : ""}
-  <g transform="translate(800 78)">
-    <circle cx="28" cy="28" r="26" fill="rgba(14,40,24,0.9)" stroke="#4FFFA2" stroke-width="2" filter="url(#${badgeGlowId})" />
-    <path d="${headerCheckPath()}" fill="none" stroke="#4FFFA2" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+  ${sealBrandIcon(brandIconX, brandY - 4, { primary: brandPalette.primary, accent: brandPalette.accent })}
+  <text class="brand" x="${brandTextX}" y="${brandY}" filter="url(#${badgeGlowId})" opacity="0.85">${brandText}</text>
+
+  <text class="headline" x="320" y="${titleY}">${headlineText}</text>
+  <text class="subhead" x="320" y="${subheadY}">Steward Verified @ Pulse ${verifiedAtPulse}</text>
+  ${valuationModeLabel ? `<text class="mode-label" x="320" y="${modeLabelY}">${valuationModeLabel}</text>` : ""}
+
+  <text class="label" x="${proofSealX}" y="${phiKeyLabelY}" text-anchor="middle">ΦKEY</text>
+  <text class="phikey" x="${proofSealX}" y="${phiKeyValueY}" text-anchor="middle">${phiShort}</text>
+
+  ${hasKas ? `<text class="label" x="320" y="${badgeLabelY}">KAS</text>` : ""}
+  ${
+    hasKas
+      ? `<g transform="translate(368 ${badgeLabelY - 22})" filter="url(#${badgeGlowId})">
+    <rect width="54" height="54" rx="14" fill="rgba(10,16,22,0.9)" stroke="${kasOk ? "#38E4B6" : "#C86B6B"}" stroke-width="2" />
+    <g transform="translate(13.5 13.5) scale(0.5)">
+      <path d="${badgeMark(kasOk)}" fill="none" stroke="${kasOk ? "#38E4B6" : "#C86B6B"}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>`
+      : ""
+  }
+
+  <text class="label" x="${g16LabelX}" y="${badgeLabelY}">G16</text>
+  <g transform="translate(${g16BadgeX} ${g16BadgeY})" filter="url(#${badgeGlowId})">
+    <rect width="${g16BadgeSize}" height="${g16BadgeSize}" rx="${g16BadgeRadius}" fill="rgba(10,16,22,0.9)" stroke="${g16Ok ? "#38E4B6" : "#C86B6B"}" stroke-width="${g16BadgeStroke}" />
+    <g transform="translate(${g16MarkTranslate} ${g16MarkTranslate}) scale(${g16MarkScale})">
+      <path d="${badgeMark(g16Ok)}" fill="none" stroke="${g16Ok ? "#38E4B6" : "#C86B6B"}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
   </g>
 
-  <text class="subhead" x="420" y="215" textLength="360" lengthAdjust="spacingAndGlyphs">
-    Steward Verified @ Pulse ${verifiedAtPulse} • ΦKey
-  </text>
-  <text class="phikey" x="420" y="285">${phiShort}</text>
+  <text class="label" x="320" y="${valueLabelY}">Φ VALUE</text>
+  <text class="value" x="320" y="${valueY}">${valuationPhi}</text>
 
-  <text class="label" x="420" y="360">KAS</text>
-  <g transform="translate(500 326)" filter="url(#${badgeGlowId})">
-    <rect width="64" height="64" rx="16" fill="rgba(10,16,22,0.9)" stroke="#35F2B8" stroke-width="2" />
-    <path d="${badgeMark(kasOk)}" fill="none" stroke="${kasOk ? "#35F2B8" : "#FF6F6F"}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <text class="label" x="320" y="${usdLabelY}">USD VALUE</text>
+  <text class="value" x="320" y="${usdValueY}">${valuationUsd}</text>
+
+  <g id="${sealId}" transform="translate(${seal.x} ${seal.y}) rotate(${seal.rotation})">
+    <circle cx="0" cy="0" r="44" fill="rgba(12,14,18,0.72)" stroke="${accent}" stroke-width="2" filter="url(#${glowId})" stroke-dasharray="${seal.dash}" />
+    <circle cx="0" cy="0" r="30" fill="none" stroke="${accentSoft}" stroke-width="1.2" opacity="0.7" />
+    <text x="0" y="-2" text-anchor="middle" class="seal" fill="${accent}">VERIFIED</text>
+    <text x="0" y="16" text-anchor="middle" class="seal" fill="${accentSoft}">${shortHash(capsuleHash, 6, 4)}</text>
   </g>
 
-  <text class="label" x="620" y="360">G16</text>
-  <g transform="translate(700 326)" filter="url(#${badgeGlowId})">
-    <rect width="64" height="64" rx="16" fill="rgba(10,16,22,0.9)" stroke="#35F2B8" stroke-width="2" />
-    <path d="${badgeMark(g16Ok)}" fill="none" stroke="${g16Ok ? "#35F2B8" : "#FF6F6F"}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
-  </g>
+  ${proofSealMarkup}
 
-  <text class="label" x="420" y="430">Φ VALUE (MINTED)</text>
-  <text class="value" x="420" y="468">${valuationPhi}</text>
-
-  <text class="label" x="420" y="510">USD VALUE (MINTED)</text>
-  <text class="value" x="420" y="546">${valuationUsd}</text>
-
-  <rect x="828" y="198" width="324" height="324" rx="34" fill="rgba(8,12,18,0.75)" stroke="${accent}" stroke-width="3" filter="url(#${glowId})" />
-  <rect x="840" y="210" width="300" height="300" rx="28" fill="rgba(10,14,20,0.65)" />
+  <rect x="${sigilFrameX}" y="${sigilFrameY}" width="${sigilFrameSize}" height="${sigilFrameSize}" rx="30" fill="rgba(6,8,12,0.75)" stroke="${accent}" stroke-width="2.4" filter="url(#${glowId})" />
+  <rect x="810" y="150" width="320" height="320" rx="26" fill="rgba(10,14,20,0.6)" />
   ${sigilImageMarkup(sigilSvg, sigilClipId)}
+  ${ornament}
 
-  <rect x="40" y="560" width="1120" height="54" rx="20" fill="rgba(0,0,0,0.45)" stroke="rgba(255,255,255,0.12)" />
-  <text class="footer" x="70" y="596">Proof of Breath™ — VERIFIED</text>
-  <text class="footer-right" x="1110" y="596" text-anchor="end">phi.network</text>
+  <rect x="${qrBoxX}" y="${qrBoxY}" width="${qrBoxW}" height="${qrBoxH}" rx="18" fill="rgba(10,12,18,0.62)" stroke="rgba(255,255,255,0.12)" />
+  ${qrImageMarkup(qrDataUrl, qrClipId, qrBoxX + 12, qrBoxY + 8)}
+
+  <g opacity="0.9">
+    <text class="micro" x="80" y="570">BUNDLE ${shortHash(bundleHashValue)}</text>
+    <text class="micro" x="80" y="588">RECEIPT ${shortHash(receiptHash)}</text>
+    <text class="micro" x="320" y="570">SVG ${shortHash(svgHash)}</text>
+    <text class="micro" x="320" y="588">CAPSULE ${shortHash(capsuleHash)}</text>
+    <text class="micro" x="820" y="588">phi.network</text>
+  </g>
 </svg>
   `.trim();
 }

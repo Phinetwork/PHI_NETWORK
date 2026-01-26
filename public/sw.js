@@ -14,7 +14,7 @@
 
 // Update this version string manually to keep the app + cache versions in sync.
 // The value is forwarded to the UI via the service worker "SW_ACTIVATED" message.
-const APP_VERSION = "42.0.0"; // update on release
+const APP_VERSION = "42.2.0"; // update on release
 const VERSION = new URL(self.location.href).searchParams.get("v") || APP_VERSION; // derived from build
 const PREFIX = "PHINETWORK";
 
@@ -167,6 +167,13 @@ async function warmUrls(urls, { mapShell = false } = {}) {
     unique.map(async (raw) => {
       const url = normalizeWarmUrl(raw);
       if (!url) return;
+
+      const hasExtension = url.pathname.split("/").pop()?.includes(".");
+
+      if (mapShell && shell && !hasExtension) {
+        await mapShellToRoute(url.href, shell);
+        return;
+      }
 
       const cacheName = cacheBucketFor(url);
       const req = new Request(url.href, { cache: "reload" });

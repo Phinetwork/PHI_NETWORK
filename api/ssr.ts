@@ -1,8 +1,9 @@
 // api/ssr.ts
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PipeableStream } from "react-dom/server";
 
@@ -31,6 +32,8 @@ type ManifestEntry = {
   src?: string;
 };
 
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
 function pickRender(mod: unknown): RenderFn | null {
   if (!mod || typeof mod !== "object") return null;
   const m = mod as SsrModule;
@@ -49,14 +52,15 @@ function toPublicPath(file?: string): string | null {
 
 function buildSsrHead(): string {
   const parts: string[] = [];
-  const manifestPath = path.join(process.cwd(), "dist", "client", ".vite", "manifest.json");
+  const manifestPaths = [
+    path.join(ROOT_DIR, "dist", ".vite", "manifest.json"),
+    path.join(ROOT_DIR, "dist", "client", ".vite", "manifest.json"),
+  ];
 
   try {
-    if (fs.existsSync(manifestPath)) {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<
-        string,
-        ManifestEntry
-      >;
+    const manifestPath = manifestPaths.find((candidate) => fs.existsSync(candidate));
+    if (manifestPath) {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, ManifestEntry>;
       const entryKey =
         Object.keys(manifest).find((key) => manifest[key]?.src?.includes("entry-client")) ??
         Object.keys(manifest).find((key) => manifest[key]?.isEntry);
@@ -127,28 +131,107 @@ function formatErrorForDebug(err: unknown): string {
   }
 }
 
+type TemplateParts = { head: string; tail: string };
+
+function minimalTemplate(): TemplateParts {
+  return {
+    head:
+      "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><div id=\"root\">",
+    tail: "</div></body></html>",
+  };
+}
+
+function loadTemplate(): TemplateParts {
+  const templatePath = path.join(ROOT_DIR, "dist", "server", "template.html");
+  try {
+    const template = fs.readFileSync(templatePath, "utf8");
+    const templateWithHead = template.replace("<!--ssr-head-->", buildSsrHead());
+    return splitTemplate(templateWithHead);
+  } catch (err) {
+    console.error("SSR template load failed:", err);
+    return minimalTemplate();
+  }
+}
+
+function resolveEntryServerPath(): string | null {
+  const serverDir = path.join(ROOT_DIR, "dist", "server");
+  const candidates = ["entry-server.js", "entry-server.mjs", "entry-server.cjs"];
+
+  for (const name of candidates) {
+    const candidate = path.join(serverDir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const files = fs.readdirSync(serverDir);
+    const match = files.find((file) => /^entry-server\.(mjs|cjs|js)$/i.test(file));
+    return match ? path.join(serverDir, match) : null;
+  } catch {
+    return null;
+  }
+}
+
+function respondWithShell(
+  res: ServerResponse,
+  parts: TemplateParts,
+  requestId: string,
+  opts: { debug: boolean; error?: unknown }
+) {
+  if (!res.headersSent) {
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("x-ssr", "0");
+    res.setHeader("x-ssr-request-id", requestId);
+    if (opts.debug) {
+      res.setHeader("x-ssr-debug", "1");
+    }
+  }
+
+  if (opts.debug && opts.error) {
+    const payload = escapeHtml(formatErrorForDebug(opts.error));
+    const debugTemplate = minimalTemplate();
+    const style =
+      "<style>body{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;padding:24px;background:#0b0b0c;color:#f2f2f2;}pre{white-space:pre-wrap;word-break:break-word;background:#151519;border:1px solid #2a2a33;padding:16px;border-radius:8px;}</style>";
+    res.end(`${debugTemplate.head}${style}<pre>${payload}</pre>${debugTemplate.tail}`);
+    return;
+  }
+
+  res.end(parts.head + parts.tail);
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   const ABORT_DELAY_MS = 10_000;
+  const requestId = randomUUID();
 
   try {
     const url = absoluteUrl(req);
-    const DEBUG = url.searchParams.has("__ssr_debug");
+    const DEBUG = url.searchParams.has("__ssr_debug") || req.headers["x-ssr-debug"] === "1";
+    const templateParts = loadTemplate();
+    const { head, tail } = templateParts;
 
-    const templatePath = path.join(process.cwd(), "dist", "server", "template.html");
-    const template = fs.readFileSync(templatePath, "utf8");
-    const templateWithHead = template.replace("<!--ssr-head-->", buildSsrHead());
-    const { head, tail } = splitTemplate(templateWithHead);
-
-    const entryPath = path.join(process.cwd(), "dist", "server", "entry-server.js");
+    const entryPath = resolveEntryServerPath();
+    if (!entryPath) {
+      const err = new Error("SSR entry-server bundle not found in dist/server");
+      console.error(`[SSR ${requestId}] entry not found`);
+      respondWithShell(res, templateParts, requestId, { debug: DEBUG, error: err });
+      return;
+    }
     const entryUrl = pathToFileURL(entryPath).href;
 
-    const mod = (await import(entryUrl)) as unknown;
-    const render = pickRender(mod);
+    let render: RenderFn | null = null;
+    try {
+      const mod = (await import(entryUrl)) as unknown;
+      render = pickRender(mod);
+    } catch (err) {
+      console.error(`[SSR ${requestId}] entry import failed:`, err);
+      respondWithShell(res, templateParts, requestId, { debug: DEBUG, error: err });
+      return;
+    }
 
     if (!render) {
-      res.statusCode = 500;
-      res.setHeader("content-type", "text/plain; charset=utf-8");
-      res.end("SSR entry missing render() export");
+      console.error(`[SSR ${requestId}] entry missing render() export`);
+      respondWithShell(res, templateParts, requestId, { debug: DEBUG });
       return;
     }
 
@@ -158,6 +241,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.setHeader("cache-control", "no-store");
     res.setHeader("x-ssr", "1");
+    res.setHeader("x-ssr-request-id", requestId);
 
     let shellFlushed = false;
     let pipeable: PipeableStream | null = null;
@@ -213,10 +297,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         // If shell failed before onShellReady, we still want to return an HTML document.
         // Debug mode: show error details in the browser.
         if (!shellFlushed) {
-          if (DEBUG) {
-            if (!res.writableEnded) res.end(`<pre>${escapeHtml(formatErrorForDebug(err))}</pre>`);
-          } else {
-            if (!res.writableEnded) res.end(head + tail);
+          if (!res.writableEnded) {
+            respondWithShell(res, templateParts, requestId, { debug: DEBUG, error: err });
           }
           return;
         }
@@ -233,12 +315,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     };
 
     // Start React SSR stream
-    pipeable = render(url.pathname + url.search, null, opts);
+    try {
+      pipeable = render(url.pathname + url.search, null, opts);
+    } catch (err) {
+      console.error(`[SSR ${requestId}] render crashed:`, err);
+      respondWithShell(res, templateParts, requestId, { debug: DEBUG, error: err });
+    }
   } catch (err) {
-    console.error("SSR function crashed:", err);
-    res.statusCode = 500;
-    res.setHeader("content-type", "text/plain; charset=utf-8");
-    res.end("SSR function crashed");
+    console.error(`[SSR ${requestId}] function crashed:`, err);
+    const DEBUG = req.headers["x-ssr-debug"] === "1";
+    respondWithShell(res, loadTemplate(), requestId, { debug: DEBUG, error: err });
   }
 }
 

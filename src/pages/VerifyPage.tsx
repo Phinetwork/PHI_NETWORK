@@ -32,23 +32,30 @@ import {
   ZK_STATEMENT_DOMAIN,
   type VerificationSource,
   type ProofCapsuleV1,
+  type NormalizedBundle,
   type ProofBundleLike,
 } from "../components/KaiVoh/verifierProof";
 import { extractProofBundleMetaFromSvg, type ProofBundleMeta } from "../utils/sigilMetadata";
 import { derivePhiKeyFromSig } from "../components/VerifierStamper/sigilUtils";
 import { tryVerifyGroth16 } from "../components/VerifierStamper/zk";
 import { isKASAuthorSig, type KASAuthorSig } from "../utils/authorSig";
-import { isWebAuthnAvailable, signBundleHash, verifyBundleAuthorSig } from "../utils/webauthnKAS";
+import {
+  derivePhiKeyFromPubKeyJwk,
+  isWebAuthnAvailable,
+  signBundleHash,
+  storePasskey,
+  verifyBundleAuthorSig,
+} from "../utils/webauthnKAS";
 import {
   buildKasChallenge,
-  ensureReceiverPasskey,
-  getWebAuthnAssertionJson,
   isReceiveSig,
   verifyWebAuthnAssertion,
   type ReceiveSig,
 } from "../utils/webauthnReceive";
-import { buildOwnerKeyDerivation, deriveOwnerPhiKeyFromReceive, type OwnerKeyDerivation } from "../utils/ownerPhiKey";
+import { assertionToJson, verifyOwnerWebAuthnAssertion } from "../utils/webauthnOwner";
+import { deriveOwnerPhiKeyFromReceive, type OwnerKeyDerivation } from "../utils/ownerPhiKey";
 import { base64UrlDecode, base64UrlEncode, sha256Hex } from "../utils/sha256";
+import { readPngTextChunk } from "../utils/pngChunks";
 import { getKaiPulseEternalInt } from "../SovereignSolar";
 import { useKaiTicker } from "../hooks/useKaiTicker";
 import { useValuation } from "./SigilPage/useValuation";
@@ -118,6 +125,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  return buf;
+}
+
+function normalizeRawDeclaredPhiKey(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.startsWith("φK-") || value.startsWith("ΦK-") || value.startsWith("phiK-")) return null;
+  return value;
+}
+
+function hasRequiredKasAuthorSig(authorSig: unknown): authorSig is KASAuthorSig {
+  if (!authorSig) return false;
+  if (!isKASAuthorSig(authorSig)) return false;
+  const credId = authorSig.credId || (authorSig as { rawId?: string }).rawId;
+  return Boolean(credId && authorSig.pubKeyJwk);
+}
+
+
+function isChildGlyph(raw: unknown): boolean {
+  if (!isRecord(raw)) return false;
+  return Boolean(
+    raw.childOfHash ||
+      raw.childClaim ||
+      raw.childAllocationPhi ||
+      raw.branchBasePhi ||
+      raw.childIssuedPulse
+  );
+}
+
 type DebitLoose = {
   amount?: number;
 };
@@ -125,17 +165,6 @@ type DebitLoose = {
 type EmbeddedPhiSource = "balance" | "embedded" | "live";
 
 type AttestationState = boolean | "missing";
-
-type ReceiveBundleState = {
-  mode?: "origin" | "receive";
-  originBundleHash?: string;
-  receiveBundleHash?: string;
-  originAuthorSig?: KASAuthorSig | null;
-  receiveSig?: ReceiveSig | null;
-  receivePulse?: number;
-  ownerPhiKey?: string;
-  ownerKeyDerivation?: OwnerKeyDerivation;
-};
 
 function readLedgerBalance(raw: unknown): { originalAmount: number; remaining: number } | null {
   if (!isRecord(raw)) return null;
@@ -246,6 +275,11 @@ type SharedReceipt = {
   verifiedAtPulse?: number;
 };
 
+type AuditBundlePayload = NormalizedBundle & {
+  verifiedAtPulse?: number;
+  zkVerified?: boolean;
+};
+
 function parseProofCapsule(raw: unknown): ProofCapsuleV1 | null {
   if (!isRecord(raw)) return null;
   if (raw.v !== "KPV-1") return null;
@@ -353,6 +387,19 @@ async function readFileText(file: File): Promise<string> {
   });
 }
 
+async function readFileArrayBuffer(file: File): Promise<ArrayBuffer> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Failed to read file."));
+    reader.onload = () => {
+      const result = reader.result;
+      if (result instanceof ArrayBuffer) resolve(result);
+      else reject(new Error("Failed to read file."));
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 function ellipsizeMiddle(s: string, head = 18, tail = 14): string {
   const t = (s || "").trim();
   if (!t) return "—";
@@ -386,6 +433,12 @@ function isSvgFile(file: File): boolean {
   const name = (file.name || "").toLowerCase();
   const type = (file.type || "").toLowerCase();
   return name.endsWith(".svg") || type === "image/svg+xml";
+}
+
+function isPngFile(file: File): boolean {
+  const name = (file.name || "").toLowerCase();
+  const type = (file.type || "").toLowerCase();
+  return name.endsWith(".png") || type === "image/png";
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -647,6 +700,8 @@ function Modal(props: { open: boolean; title: string; subtitle?: string; onClose
 
 export default function VerifyPage(): ReactElement {
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const pngFileRef = useRef<HTMLInputElement | null>(null);
+  const lastAutoScanKeyRef = useRef<string | null>(null);
 
   const slugRaw = useMemo(() => readSlugFromLocation(), []);
   const slug = useMemo(() => parseSlug(slugRaw), [slugRaw]);
@@ -669,13 +724,14 @@ export default function VerifyPage(): ReactElement {
   const [embeddedProof, setEmbeddedProof] = useState<ProofBundleMeta | null>(null);
   const [notice, setNotice] = useState<string>("");
 
-  const [authorSigVerified, setAuthorSigVerified] = useState<boolean | null>(null);
+  const [ownerAuthVerified, setOwnerAuthVerified] = useState<boolean | null>(null);
+  const [ownerAuthStatus, setOwnerAuthStatus] = useState<string>("Not present");
+  const [ownerAuthBusy, setOwnerAuthBusy] = useState<boolean>(false);
+  const [identityScanRequested, setIdentityScanRequested] = useState<boolean>(false);
+  const [provenanceSigVerified, setProvenanceSigVerified] = useState<boolean | null>(null);
   const [receiveSigVerified, setReceiveSigVerified] = useState<boolean | null>(null);
   const [ownerPhiKeyVerified, setOwnerPhiKeyVerified] = useState<boolean | null>(null);
   const [ownershipAttested, setOwnershipAttested] = useState<AttestationState>("missing");
-  const [identityAttested, setIdentityAttested] = useState<AttestationState>("missing");
-  const [identityScanRequested, setIdentityScanRequested] = useState<boolean>(false);
-  const [identityScanBusy, setIdentityScanBusy] = useState<boolean>(false);
   const [artifactAttested, setArtifactAttested] = useState<AttestationState>("missing");
 
   const [zkVerify, setZkVerify] = useState<boolean | null>(null);
@@ -691,8 +747,6 @@ export default function VerifyPage(): ReactElement {
   const [valuationHash, setValuationHash] = useState<string>("");
 
   const [receiveSig, setReceiveSig] = useState<ReceiveSig | null>(null);
-  const [localReceiveBundle, setLocalReceiveBundle] = useState<ReceiveBundleState | null>(null);
-  const [receiveBusy, setReceiveBusy] = useState<boolean>(false);
 
   const [dragActive, setDragActive] = useState<boolean>(false);
 
@@ -776,26 +830,56 @@ export default function VerifyPage(): ReactElement {
         : "Live glyph valuation";
 
   const isReceiveGlyph = useMemo(() => {
-    const mode = localReceiveBundle?.mode ?? embeddedProof?.mode ?? sharedReceipt?.mode;
+    const mode = embeddedProof?.mode ?? sharedReceipt?.mode;
     if (mode === "receive") return true;
-    if (localReceiveBundle?.receiveSig || embeddedProof?.receiveSig || sharedReceipt?.receiveSig) return true;
-    if (localReceiveBundle?.originBundleHash || embeddedProof?.originBundleHash || sharedReceipt?.originBundleHash) return true;
-    if (localReceiveBundle?.ownerPhiKey || embeddedProof?.ownerPhiKey || sharedReceipt?.ownerPhiKey) return true;
+    if (embeddedProof?.receiveSig || sharedReceipt?.receiveSig) return true;
+    if (embeddedProof?.originBundleHash || sharedReceipt?.originBundleHash) return true;
+    if (embeddedProof?.ownerPhiKey || sharedReceipt?.ownerPhiKey) return true;
     return false;
   }, [
     embeddedProof?.mode,
     embeddedProof?.originBundleHash,
     embeddedProof?.ownerPhiKey,
     embeddedProof?.receiveSig,
-    localReceiveBundle?.mode,
-    localReceiveBundle?.originBundleHash,
-    localReceiveBundle?.ownerPhiKey,
-    localReceiveBundle?.receiveSig,
     sharedReceipt?.mode,
     sharedReceipt?.originBundleHash,
     sharedReceipt?.ownerPhiKey,
     sharedReceipt?.receiveSig,
   ]);
+  const effectiveOriginBundleHash = useMemo(
+    () =>
+      embeddedProof?.originBundleHash ??
+      sharedReceipt?.originBundleHash ??
+      undefined,
+    [embeddedProof?.originBundleHash, sharedReceipt?.originBundleHash],
+  );
+  const provenanceAuthorSig = useMemo(
+    () =>
+      embeddedProof?.originAuthorSig ??
+      sharedReceipt?.originAuthorSig ??
+      null,
+    [embeddedProof?.originAuthorSig, sharedReceipt?.originAuthorSig],
+  );
+  const hasKASProvenanceSig = useMemo(
+    () => hasRequiredKasAuthorSig(provenanceAuthorSig),
+    [provenanceAuthorSig],
+  );
+  const ownerAuthorSig = useMemo(
+    () => embeddedProof?.authorSig ?? (result.status === "ok" ? result.embedded.authorSig ?? null : null),
+    [embeddedProof?.authorSig, result],
+  );
+  const hasKASOwnerSig = useMemo(
+    () => hasRequiredKasAuthorSig(embeddedProof?.authorSig ?? (result.status === "ok" ? result.embedded.authorSig : null)),
+    [embeddedProof?.authorSig, result],
+  );
+  const hasKASReceiveSig = useMemo(() => {
+    if (!receiveSig) return false;
+    return Boolean(receiveSig.credId && receiveSig.pubKeyJwk);
+  }, [receiveSig]);
+  const hasKASAuthSig = hasKASOwnerSig || hasKASReceiveSig;
+  const effectiveOwnerSig = ownerAuthorSig;
+  const isChildGlyphValue =
+    isChildGlyph(result.status === "ok" ? result.embedded.raw : null) || isChildGlyph(embeddedProof?.raw);
 
 
   // Focus Views
@@ -872,6 +956,13 @@ export default function VerifyPage(): ReactElement {
     return () => window.clearTimeout(t);
   }, [notice]);
 
+  React.useEffect(() => {
+    if (result.status === "ok") return;
+    setOwnerAuthVerified(null);
+    setOwnerAuthStatus("Not present");
+    setOwnerAuthBusy(false);
+  }, [result.status]);
+
   const openChartPopover = useCallback((focus: "phi" | "usd") => {
     const nextFocus = isReceiveGlyph ? "usd" : focus;
     setChartFocus(nextFocus);
@@ -892,9 +983,10 @@ export default function VerifyPage(): ReactElement {
   }, [setSealPopover]);
 
   const openKasPopover = useCallback(() => {
+    if (!hasKASAuthSig) return;
     setPanel("audit");
     setSealPopover("kas");
-  }, [setPanel, setSealPopover]);
+  }, [hasKASAuthSig, setPanel, setSealPopover]);
 
   const openG16Popover = useCallback(() => {
     setPanel("zk");
@@ -916,12 +1008,16 @@ export default function VerifyPage(): ReactElement {
 
   React.useEffect(() => {
     if (!sealPopover) return;
+    if (sealPopover === "kas" && !hasKASAuthSig) {
+      setSealPopover(null);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") closeSealPopover();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeSealPopover, sealPopover]);
+  }, [closeSealPopover, hasKASAuthSig, sealPopover]);
 
   const chartPhi = useMemo(() => {
     const candidate = displayPhi ?? liveValuePhi ?? 0;
@@ -1004,7 +1100,7 @@ export default function VerifyPage(): ReactElement {
   const onPickFile = useCallback(
     async (file: File): Promise<void> => {
       if (!isSvgFile(file)) {
-        setResult({ status: "error", message: "Upload a sealed .svg (embedded <metadata> JSON).", slug });
+        setResult({ status: "error", message: "inhale a sealed .svg (embedded <metadata> JSON).", slug });
         return;
       }
       const text = await readFileText(file);
@@ -1015,24 +1111,201 @@ export default function VerifyPage(): ReactElement {
     [slug],
   );
 
+  const onPickReceiptPng = useCallback(
+    async (file: File): Promise<void> => {
+      if (!isPngFile(file)) {
+        setResult({ status: "error", message: "Select a receipt PNG with embedded proof metadata.", slug });
+        return;
+      }
+      try {
+        const buffer = await readFileArrayBuffer(file);
+        const text = readPngTextChunk(new Uint8Array(buffer), "phi_proof_bundle");
+        if (!text) {
+          setResult({ status: "error", message: "Receipt PNG is missing embedded proof metadata.", slug });
+          return;
+        }
+        const parsed = JSON.parse(text) as unknown;
+        const receipt = buildSharedReceiptFromObject(parsed);
+        if (!receipt) {
+          setResult({ status: "error", message: "Receipt PNG contains an invalid proof bundle.", slug });
+          return;
+        }
+        setSharedReceipt(receipt);
+        setSvgText("");
+        setResult({ status: "idle" });
+        setNotice("Receipt PNG loaded.");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to read receipt PNG.";
+        setResult({ status: "error", message: msg, slug });
+      }
+    },
+    [slug],
+  );
+
   const handleFiles = useCallback(
     (files: FileList | null | undefined): void => {
       if (!files || files.length === 0) return;
       const arr = Array.from(files);
+      const png = arr.find(isPngFile);
+      if (png) {
+        void onPickReceiptPng(png);
+        return;
+      }
       const svg = arr.find(isSvgFile);
       if (!svg) {
-        setResult({ status: "error", message: "Drop/select a sealed .svg file.", slug });
+        setResult({ status: "error", message: "Drop/select a sealed .svg file or receipt PNG.", slug });
         return;
       }
       void onPickFile(svg);
     },
-    [onPickFile, slug],
+    [onPickFile, onPickReceiptPng, slug],
+  );
+
+  const runOwnerAuthFlow = useCallback(
+    async (args: {
+      ownerAuthorSig: KASAuthorSig | null;
+      glyphPhiKeyDeclared: string | null;
+      glyphPhiKeyFallback: string | null;
+    }): Promise<void> => {
+      if (ownerAuthBusy) return;
+      setOwnerAuthVerified(null);
+
+      const ownerAuthorSig = args.ownerAuthorSig;
+      if (!hasRequiredKasAuthorSig(ownerAuthorSig)) return;
+
+      if (!isWebAuthnAvailable()) {
+        setOwnerAuthStatus("Authentication not completed.");
+        setNotice("WebAuthn is not available in this browser. Please verify on a device with passkeys enabled.");
+        return;
+      }
+
+      const expectedCredId =
+        ownerAuthorSig.credId || (ownerAuthorSig as { rawId?: string }).rawId || "";
+      if (!expectedCredId) {
+        setOwnerAuthVerified(false);
+        setOwnerAuthStatus("Steward mismatch.");
+        return;
+      }
+
+      setOwnerAuthBusy(true);
+      setOwnerAuthStatus("Waiting for steward authentication…");
+      const challengeBytes = crypto.getRandomValues(new Uint8Array(32));
+      const requestAssertion = async (
+        allowCredentials?: PublicKeyCredentialDescriptor[]
+      ): Promise<PublicKeyCredential | null> => {
+        try {
+          const got = await navigator.credentials.get({
+            publicKey: {
+              challenge: challengeBytes,
+              userVerification: "required",
+              timeout: 60_000,
+              ...(allowCredentials ? { allowCredentials } : {}),
+            },
+          });
+          return (got ?? null) as PublicKeyCredential | null;
+        } catch {
+          return null;
+        }
+      };
+
+      let allowCredentials: PublicKeyCredentialDescriptor[] | undefined;
+      if (expectedCredId) {
+        try {
+          const idBytes = base64UrlDecode(expectedCredId);
+          allowCredentials = [{ type: "public-key" as const, id: toArrayBuffer(idBytes) }];
+        } catch {
+          allowCredentials = undefined;
+        }
+      }
+
+      let assertion = await requestAssertion(allowCredentials);
+      if (!assertion) {
+        setOwnerAuthStatus("Searching for signer passkey…");
+        assertion = await requestAssertion();
+      }
+
+      if (assertion) {
+        const assertionJson = assertionToJson(assertion);
+        const verified = await verifyOwnerWebAuthnAssertion({
+          assertion: assertionJson,
+          expectedChallenge: challengeBytes,
+          pubKeyJwk: ownerAuthorSig.pubKeyJwk,
+          expectedCredId,
+        });
+
+        if (!verified) {
+          setOwnerAuthVerified(false);
+          setOwnerAuthStatus("Signer mismatch.");
+          setOwnerAuthBusy(false);
+          return;
+        }
+
+        const declaredPhiKey = args.glyphPhiKeyDeclared;
+        if (declaredPhiKey) {
+          const signerPhiKey = await derivePhiKeyFromPubKeyJwk(ownerAuthorSig.pubKeyJwk);
+          if (signerPhiKey !== declaredPhiKey) {
+            setOwnerAuthVerified(false);
+            setOwnerAuthStatus("Signer mismatch.");
+            setOwnerAuthBusy(false);
+            return;
+          }
+        }
+
+        const storePhiKey = args.glyphPhiKeyDeclared ?? args.glyphPhiKeyFallback;
+        if (storePhiKey) {
+          storePasskey(storePhiKey, {
+            credId: assertionJson.rawId,
+            pubKeyJwk: ownerAuthorSig.pubKeyJwk,
+          });
+        }
+        setOwnerAuthVerified(true);
+        setOwnerAuthStatus("Steward verified");
+        setOwnerAuthBusy(false);
+        return;
+      }
+
+      setOwnerAuthVerified(false);
+      setOwnerAuthStatus("Steward credential not found on this device.");
+      setOwnerAuthBusy(false);
+    },
+    [ownerAuthBusy],
+  );
+
+  const stampAuditFields = useCallback(
+    (params: {
+      nextResult: VerifyResult;
+      embeddedMeta?: ProofBundleMeta | null;
+      bundleHashValue?: string;
+    }): void => {
+      const bundleHashValue = params.bundleHashValue ?? "";
+      if (params.nextResult.status !== "ok" || !bundleHashValue) {
+        setReceiveSig(null);
+        setReceiveSigVerified(null);
+        setOwnerPhiKeyVerified(null);
+        setOwnershipAttested("missing");
+        return;
+      }
+
+      const embeddedReceive =
+        params.embeddedMeta?.receiveSig ??
+        readReceiveSigFromBundle(params.embeddedMeta?.raw ?? params.nextResult.embedded.raw);
+      if (embeddedReceive) {
+        setReceiveSig(embeddedReceive);
+        return;
+      }
+
+      setReceiveSig(null);
+      setReceiveSigVerified(null);
+      setOwnerPhiKeyVerified(null);
+      setOwnershipAttested("missing");
+    },
+    [],
   );
 
   const runVerify = useCallback(async (): Promise<void> => {
     const raw = svgText.trim();
     if (!raw) {
-      setResult({ status: "error", message: "Inhale or paste the sealed SVG (ΦKey).", slug });
+      setResult({ status: "error", message: "Inhale or remember the sealed SVG (ΦKey).", slug });
       return;
     }
     const receipt = parseSharedReceiptFromText(raw);
@@ -1062,15 +1335,87 @@ if (receipt.receiptHash) {
       const next = await verifySigilSvg(slug, raw, verifiedAtPulse);
       setResult(next);
       if (next.status === "ok") {
-        setIdentityAttested("missing");
-        setIdentityScanRequested(true);
+        const embeddedProofMeta = extractProofBundleMetaFromSvg(raw);
+        const ownerAuthorSig = embeddedProofMeta?.authorSig ?? next.embedded.authorSig ?? null;
+        const rawEmbeddedPhiKey = next.embeddedRawPhiKey ?? null;
+        const glyphPhiKeyDeclared = normalizeRawDeclaredPhiKey(rawEmbeddedPhiKey);
+        const glyphPhiKeyFallback = glyphPhiKeyDeclared ? null : next.derivedPhiKey ?? null;
+        if (hasRequiredKasAuthorSig(ownerAuthorSig)) {
+          await runOwnerAuthFlow({ ownerAuthorSig, glyphPhiKeyDeclared, glyphPhiKeyFallback });
+        }
+        stampAuditFields({
+          nextResult: next,
+          embeddedMeta: embeddedProofMeta,
+          bundleHashValue: embeddedProofMeta?.bundleHash ?? "",
+        });
       } else {
-        setIdentityScanRequested(false);
+        setOwnerAuthVerified(null);
+        setOwnerAuthStatus("Not present");
       }
     } finally {
       setBusy(false);
     }
-  }, [currentPulse, slug, svgText]);
+  }, [currentPulse, runOwnerAuthFlow, slug, stampAuditFields, svgText]);
+
+  const identityAttested: AttestationState = hasKASOwnerSig ? (ownerAuthVerified === null ? "missing" : ownerAuthVerified) : "missing";
+
+  const autoScanContext = useMemo(() => {
+    if (!sharedReceipt) return null;
+    const authorSig = embeddedProof?.authorSig ?? sharedReceipt.authorSig ?? null;
+    if (!hasRequiredKasAuthorSig(authorSig)) return null;
+    const bundleHashValue = sharedReceipt.bundleHash ?? bundleHash;
+    if (!bundleHashValue) return null;
+    const expectedCredId = authorSig.credId || (authorSig as { rawId?: string }).rawId || "";
+    if (!expectedCredId) return null;
+    try {
+      base64UrlDecode(expectedCredId);
+    } catch {
+      return null;
+    }
+    const authorSigBundleHash = bundleHashFromAuthorSig(authorSig) ?? "";
+    return { authorSig, bundleHashValue, authorSigBundleHash, expectedCredId };
+  }, [bundleHash, embeddedProof?.authorSig, sharedReceipt]);
+
+  const autoScanFallbackPhiKey = useMemo(
+    () => (sharedReceipt?.proofCapsule?.phiKey ? sharedReceipt.proofCapsule.phiKey : null),
+    [sharedReceipt?.proofCapsule?.phiKey],
+  );
+
+  React.useEffect(() => {
+    if (!hasKASOwnerSig) return;
+    if (identityAttested !== "missing") return;
+    if (!autoScanContext) return;
+    const autoScanKey = `${autoScanContext.bundleHashValue}|${autoScanContext.authorSigBundleHash}|${autoScanContext.expectedCredId}`;
+    if (lastAutoScanKeyRef.current === autoScanKey) return;
+    lastAutoScanKeyRef.current = autoScanKey;
+    setIdentityScanRequested(true);
+  }, [autoScanContext, hasKASOwnerSig, identityAttested]);
+
+  React.useEffect(() => {
+    if (!hasKASOwnerSig) return;
+    if (!identityScanRequested) return;
+    if (!autoScanContext) return;
+    void runOwnerAuthFlow({
+      ownerAuthorSig: autoScanContext.authorSig,
+      glyphPhiKeyDeclared: null,
+      glyphPhiKeyFallback: autoScanFallbackPhiKey,
+    });
+    setIdentityScanRequested(false);
+  }, [autoScanContext, autoScanFallbackPhiKey, hasKASOwnerSig, identityScanRequested, runOwnerAuthFlow]);
+
+  React.useEffect(() => {
+    if (!hasKASOwnerSig) {
+      if (identityScanRequested) setIdentityScanRequested(false);
+      return;
+    }
+    if (identityAttested !== "missing") {
+      if (identityScanRequested) setIdentityScanRequested(false);
+      return;
+    }
+    if (!autoScanContext && identityScanRequested) {
+      setIdentityScanRequested(false);
+    }
+  }, [autoScanContext, hasKASOwnerSig, identityAttested, identityScanRequested]);
 
   // Proof bundle construction (logic unchanged)
   React.useEffect(() => {
@@ -1084,7 +1429,7 @@ if (receipt.receiptHash) {
         setBundleRoot(null);
         setBundleHash("");
         setEmbeddedProof(null);
-        setAuthorSigVerified(null);
+        setProvenanceSigVerified(null);
         setVerificationCacheEntry(null);
         setZkVerifiedCached(false);
         setVerificationSig(null);
@@ -1118,7 +1463,7 @@ if (receipt.receiptHash) {
           proofHints: sharedReceipt.proofHints,
           zkPublicInputs: sharedReceipt.zkPublicInputs,
         });
-        setAuthorSigVerified(null);
+        setProvenanceSigVerified(null);
         return;
       }
 
@@ -1150,7 +1495,7 @@ if (receipt.receiptHash) {
       const verificationVersionValue = embedded?.verificationVersion;
       const proofHintsValue = embedded?.transport?.proofHints ?? embedded?.proofHints;
       const embeddedMode = embedded?.mode;
-      const embeddedOriginSig = embedded?.originAuthorSig;
+      const provenanceAuthorSig = embedded?.originAuthorSig;
 
       const bundleSeed =
         embedded?.raw && typeof embedded.raw === "object" && embedded.raw !== null
@@ -1185,12 +1530,12 @@ if (receipt.receiptHash) {
               mode: embeddedMode,
               originBundleHash: embedded?.originBundleHash,
               receiveBundleHash: embedded?.receiveBundleHash,
-              originAuthorSig: embeddedOriginSig ?? null,
+              originAuthorSig: provenanceAuthorSig ?? null,
               receiveSig: embedded?.receiveSig ?? null,
               receivePulse: embedded?.receivePulse,
               ownerPhiKey: embedded?.ownerPhiKey,
               ownerKeyDerivation: embedded?.ownerKeyDerivation,
-              authorSig: embeddedMode === "receive" || embeddedOriginSig ? null : embedded?.authorSig ?? null,
+              authorSig: embedded?.authorSig ?? null,
             };
 
       const bundleRootNext = buildBundleRoot(bundleSeed);
@@ -1211,24 +1556,12 @@ if (receipt.receiptHash) {
         embedded?.bindings?.bundleHashOf === PROOF_BINDINGS.bundleHashOf;
       const bundleHashNext = useRootHash ? rootHash : legacyHash;
 
-      const authorSigNext = embeddedOriginSig ?? embedded?.authorSig;
-      let authorSigOk: boolean | null = null;
-
-      if (embeddedOriginSig) {
-        if (!embedded?.originBundleHash || !isKASAuthorSig(embeddedOriginSig)) {
-          authorSigOk = false;
+      let provenanceSigOk: boolean | null = null;
+      if (provenanceAuthorSig) {
+        if (!embedded?.originBundleHash || !hasRequiredKasAuthorSig(provenanceAuthorSig)) {
+          provenanceSigOk = null;
         } else {
-          authorSigOk = await verifyBundleAuthorSig(embedded.originBundleHash, embeddedOriginSig);
-        }
-      } else if (authorSigNext) {
-        if (isKASAuthorSig(authorSigNext)) {
-          const authorSigBundleHash = bundleHashFromAuthorSig(authorSigNext);
-          const candidateHashes = Array.from(
-            new Set([authorSigBundleHash, bundleHashNext, rootHash, legacyHash].filter(Boolean))
-          ) as string[];
-          authorSigOk = await verifyAuthorSigWithFallback(authorSigNext, candidateHashes);
-        } else {
-          authorSigOk = false;
+          provenanceSigOk = await verifyBundleAuthorSig(embedded.originBundleHash, provenanceAuthorSig);
         }
       }
 
@@ -1239,7 +1572,7 @@ if (receipt.receiptHash) {
       setBundleRoot(useRootHash ? bundleRootNext : embedded?.bundleRoot ?? null);
       setBundleHash(bundleHashNext);
       setEmbeddedProof(embedded);
-      setAuthorSigVerified(authorSigOk);
+      setProvenanceSigVerified(provenanceSigOk);
     };
 
     void buildProof();
@@ -1323,6 +1656,7 @@ if (receipt.receiptHash) {
               embedded: baseEmbedded,
               derivedPhiKey,
               checks,
+              embeddedRawPhiKey: capsule.phiKey,
             }
           : {
               status: "ok",
@@ -1331,6 +1665,7 @@ if (receipt.receiptHash) {
               derivedPhiKey,
               checks,
               verifiedAtPulse,
+              embeddedRawPhiKey: capsule.phiKey,
             },
       );
       setEmbeddedProof(embed);
@@ -1376,29 +1711,8 @@ React.useEffect(() => {
   }, [embeddedProof?.verificationSig, sharedReceipt?.verificationSig, bundleHash]);
 
   React.useEffect(() => {
-    if (result.status !== "ok" || !bundleHash) {
-      setReceiveSig(null);
-      setReceiveSigVerified(null);
-      setOwnerPhiKeyVerified(null);
-      setOwnershipAttested("missing");
-      return;
-    }
-    const embeddedReceive = embeddedProof?.receiveSig ?? readReceiveSigFromBundle(embeddedProof?.raw ?? result.embedded.raw);
-    if (embeddedReceive) {
-      setReceiveSig(embeddedReceive);
-      return;
-    }
-
-    setReceiveSig(null);
-    setReceiveSigVerified(null);
-    setOwnerPhiKeyVerified(null);
-    setOwnershipAttested("missing");
-  }, [result.status, bundleHash, embeddedProof?.raw]);
-
-  React.useEffect(() => {
-    setLocalReceiveBundle(null);
-  }, [bundleHash, svgText]);
-
+    stampAuditFields({ nextResult: result, embeddedMeta: embeddedProof, bundleHashValue: bundleHash });
+  }, [bundleHash, embeddedProof, result, stampAuditFields]);
 
   React.useEffect(() => {
     let active = true;
@@ -1414,13 +1728,6 @@ React.useEffect(() => {
       active = false;
     };
   }, [receiptHash, verificationSig]);
-
-  React.useEffect(() => {
-    if (!svgText.trim()) {
-      setIdentityAttested("missing");
-      setIdentityScanRequested(false);
-    }
-  }, [svgText]);
 
   React.useEffect(() => {
     const raw = svgText.trim();
@@ -1626,48 +1933,6 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     zkVkey,
   ]);
 
-  const attemptIdentityScan = useCallback(
-    async (authorSig: KASAuthorSig, bundleHashValue: string): Promise<void> => {
-      if (identityScanBusy) return;
-      setIdentityScanBusy(true);
-      try {
-        if (!isWebAuthnAvailable()) {
-          setIdentityAttested(false);
-          setNotice("WebAuthn is not available in this browser. Please verify on a device with passkeys enabled.");
-          return;
-        }
-        const { challengeBytes } = await buildKasChallenge("unlock", bundleHashValue);
-        let assertion: Awaited<ReturnType<typeof getWebAuthnAssertionJson>>;
-        try {
-          assertion = await getWebAuthnAssertionJson({
-            challenge: challengeBytes,
-            allowCredIds: [authorSig.credId],
-            preferInternal: true,
-          });
-        } catch {
-          assertion = await getWebAuthnAssertionJson({
-            challenge: challengeBytes,
-            preferInternal: true,
-          });
-        }
-        const ok = await verifyWebAuthnAssertion({
-          assertion,
-          expectedChallenge: challengeBytes,
-          pubKeyJwk: authorSig.pubKeyJwk,
-          expectedCredId: authorSig.credId,
-        });
-        setIdentityAttested(ok);
-        if (!ok) setNotice("Identity verification failed.");
-      } catch {
-        setIdentityAttested(false);
-        setNotice("Identity verification canceled.");
-      } finally {
-        setIdentityScanBusy(false);
-        setIdentityScanRequested(false);
-      }
-    },
-    [identityScanBusy]
-  );
   const verificationReceipt = useMemo<VerificationReceipt | null>(() => {
     if (!bundleHash || !zkMeta?.zkPoseidonHash || stewardVerifiedPulse == null) return null;
     const valuationPayload = valuationSnapshot && valuationHash ? { valuation: valuationSnapshot, valuationHash } : undefined;
@@ -1681,26 +1946,31 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     });
   }, [bundleHash, stewardVerifiedPulse, valuationHash, valuationSnapshot, verificationSource, verificationVersion, zkMeta?.zkPoseidonHash]);
 
-  const effectiveReceiveSig = useMemo(() => localReceiveBundle?.receiveSig ?? receiveSig ?? null, [localReceiveBundle?.receiveSig, receiveSig]);
+  const effectiveReceiveSig = useMemo(() => receiveSig ?? null, [receiveSig]);
   const effectiveReceivePulse = useMemo(() => {
-    if (localReceiveBundle?.receivePulse != null) return localReceiveBundle.receivePulse;
     if (embeddedProof?.receivePulse != null) return embeddedProof.receivePulse;
     if (sharedReceipt?.receivePulse != null) return sharedReceipt.receivePulse;
     return effectiveReceiveSig?.createdAtPulse ?? null;
-  }, [embeddedProof?.receivePulse, localReceiveBundle?.receivePulse, sharedReceipt?.receivePulse, effectiveReceiveSig?.createdAtPulse]);
+  }, [
+    embeddedProof?.receivePulse,
+    sharedReceipt?.receivePulse,
+    effectiveReceiveSig?.createdAtPulse,
+  ]);
   const effectiveReceiveBundleHash = useMemo(() => {
-    if (localReceiveBundle?.receiveBundleHash) return localReceiveBundle.receiveBundleHash;
     if (embeddedProof?.receiveBundleHash) return embeddedProof.receiveBundleHash;
     if (sharedReceipt?.receiveBundleHash) return sharedReceipt.receiveBundleHash;
     if (effectiveReceiveSig?.binds.bundleHash) return effectiveReceiveSig.binds.bundleHash;
     return "";
-  }, [embeddedProof?.receiveBundleHash, effectiveReceiveSig?.binds.bundleHash, localReceiveBundle?.receiveBundleHash, sharedReceipt?.receiveBundleHash]);
+  }, [
+    embeddedProof?.receiveBundleHash,
+    effectiveReceiveSig?.binds.bundleHash,
+    sharedReceipt?.receiveBundleHash,
+  ]);
   const effectiveReceiveMode = useMemo(() => {
-    if (localReceiveBundle?.mode) return localReceiveBundle.mode;
     if (embeddedProof?.mode) return embeddedProof.mode;
     if (sharedReceipt?.mode) return sharedReceipt.mode;
     return effectiveReceiveSig ? "receive" : undefined;
-  }, [embeddedProof?.mode, effectiveReceiveSig, localReceiveBundle?.mode, sharedReceipt?.mode]);
+  }, [embeddedProof?.mode, effectiveReceiveSig, sharedReceipt?.mode]);
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1714,14 +1984,13 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     if (result.status === "ok") {
       ogImageUrl.searchParams.set("pulse", String(result.embedded.pulse ?? slug.pulse ?? ""));
       const ogPhiKey =
-        localReceiveBundle?.ownerPhiKey ??
         embeddedProof?.ownerPhiKey ??
         sharedReceipt?.ownerPhiKey ??
         result.derivedPhiKey ??
         "";
       ogImageUrl.searchParams.set("phiKey", ogPhiKey);
       if (result.embedded.chakraDay) ogImageUrl.searchParams.set("chakraDay", result.embedded.chakraDay);
-      const kasStatus = effectiveReceiveSig ? receiveSigVerified : authorSigVerified;
+      const kasStatus = ownerAuthVerified;
       if (kasStatus != null) ogImageUrl.searchParams.set("kas", kasStatus ? "1" : "0");
       if (zkVerify != null) ogImageUrl.searchParams.set("g16", zkVerify ? "1" : "0");
     }
@@ -1736,10 +2005,9 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     ensureMetaTag("name", "twitter:description", `Proof of Breath™ • ${statusLabel} • Pulse ${slug.pulse ?? "—"}`);
     ensureMetaTag("name", "twitter:image", ogImageUrl.toString());
   }, [
-    authorSigVerified,
+    ownerAuthVerified,
     effectiveReceiveSig,
     embeddedProof?.ownerPhiKey,
-    localReceiveBundle?.ownerPhiKey,
     receiveSigVerified,
     result,
     sharedReceipt?.ownerPhiKey,
@@ -1748,37 +2016,34 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     slugRaw,
     zkVerify,
   ]);
-  const effectiveOriginBundleHash = useMemo(
-    () =>
-      localReceiveBundle?.originBundleHash ??
-      embeddedProof?.originBundleHash ??
-      sharedReceipt?.originBundleHash ??
-      undefined,
-    [embeddedProof?.originBundleHash, localReceiveBundle?.originBundleHash, sharedReceipt?.originBundleHash],
-  );
-  const effectiveOriginAuthorSig = useMemo(
-    () =>
-      localReceiveBundle?.originAuthorSig ??
-      embeddedProof?.originAuthorSig ??
-      sharedReceipt?.originAuthorSig ??
-      null,
-    [embeddedProof?.originAuthorSig, localReceiveBundle?.originAuthorSig, sharedReceipt?.originAuthorSig],
-  );
+  React.useEffect(() => {
+    if (!hasKASOwnerSig) {
+      setOwnerAuthVerified(null);
+      setOwnerAuthStatus("Not present");
+      setOwnerAuthBusy(false);
+    }
+    if ((isReceiveGlyph || isChildGlyphValue) && effectiveOwnerSig && provenanceAuthorSig && effectiveOwnerSig === provenanceAuthorSig) {
+      throw new Error("Invariant violation: provenance authorSig cannot be used as owner for receive/child glyphs.");
+    }
+  }, [effectiveOwnerSig, embeddedProof?.raw, hasKASOwnerSig, isChildGlyphValue, isReceiveGlyph, provenanceAuthorSig, result]);
   const effectiveOwnerPhiKey = useMemo(
     () =>
-      localReceiveBundle?.ownerPhiKey ??
       embeddedProof?.ownerPhiKey ??
       sharedReceipt?.ownerPhiKey ??
-      undefined,
-    [embeddedProof?.ownerPhiKey, localReceiveBundle?.ownerPhiKey, sharedReceipt?.ownerPhiKey],
+      (effectiveReceiveSig ? undefined : result.status === "ok" ? result.derivedPhiKey : undefined),
+    [
+      embeddedProof?.ownerPhiKey,
+      sharedReceipt?.ownerPhiKey,
+      effectiveReceiveSig,
+      result,
+    ],
   );
   const effectiveOwnerKeyDerivation = useMemo(
     () =>
-      localReceiveBundle?.ownerKeyDerivation ??
       embeddedProof?.ownerKeyDerivation ??
       sharedReceipt?.ownerKeyDerivation ??
       undefined,
-    [embeddedProof?.ownerKeyDerivation, localReceiveBundle?.ownerKeyDerivation, sharedReceipt?.ownerKeyDerivation],
+    [embeddedProof?.ownerKeyDerivation, sharedReceipt?.ownerKeyDerivation],
   );
 
   const receiveBundleRoot = useMemo(() => {
@@ -1801,7 +2066,7 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
       bundleRoot: bundleRoot ?? embeddedProof?.bundleRoot ?? undefined,
       bundle: bundleSeed,
       originBundleHash: effectiveOriginBundleHash ?? bundleHash ?? undefined,
-      originAuthorSig: effectiveOriginAuthorSig ?? null,
+      originAuthorSig: provenanceAuthorSig ?? null,
       receivePulse: effectiveReceivePulse ?? undefined,
     });
   }, [
@@ -1814,7 +2079,7 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     embeddedProof?.hashAlg,
     embeddedProof?.zkMeta,
     embeddedProof?.zkStatement,
-    effectiveOriginAuthorSig,
+    provenanceAuthorSig,
     effectiveOriginBundleHash,
     effectiveReceivePulse,
     proofCapsule,
@@ -1826,15 +2091,40 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
 
   React.useEffect(() => {
     let active = true;
+    if (!hasKASAuthSig) {
+      setOwnerPhiKeyVerified(null);
+      setOwnershipAttested("missing");
+      return;
+    }
     const receiveMode = effectiveReceiveMode === "receive";
 
     if (!receiveMode && !effectiveReceiveSig) {
+      if (ownerAuthVerified === true) {
+        setOwnerPhiKeyVerified(true);
+        setOwnershipAttested(true);
+        return;
+      }
+      if (ownerAuthVerified === false) {
+        setOwnerPhiKeyVerified(false);
+        setOwnershipAttested(false);
+        return;
+      }
       setOwnerPhiKeyVerified(null);
       setOwnershipAttested("missing");
       return;
     }
 
     if (!effectiveReceiveSig) {
+      if (ownerAuthVerified === true) {
+        setOwnerPhiKeyVerified(true);
+        setOwnershipAttested(true);
+        return;
+      }
+      if (ownerAuthVerified === false) {
+        setOwnerPhiKeyVerified(false);
+        setOwnershipAttested(false);
+        return;
+      }
       setOwnerPhiKeyVerified(null);
       setOwnershipAttested("missing");
       return;
@@ -1923,73 +2213,51 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     effectiveReceiveMode,
     effectiveReceivePulse,
     effectiveReceiveSig,
+    hasKASAuthSig,
     receiveBundleRoot,
     receiveSigVerified,
+    ownerAuthVerified,
   ]);
 
   React.useEffect(() => {
     let active = true;
     if (!bundleHash) return;
-    const originSig = effectiveOriginAuthorSig;
-    const legacySig = embeddedProof?.authorSig;
+    if (isReceiveGlyph) {
+      setProvenanceSigVerified(null);
+      return;
+    }
+    const originSig = provenanceAuthorSig;
 
-    if (!originSig && !legacySig) {
-      setAuthorSigVerified(null);
+    if (!originSig || !hasKASProvenanceSig) {
+      setProvenanceSigVerified(null);
       return;
     }
 
     (async () => {
-      if (originSig) {
-        if (!isKASAuthorSig(originSig)) {
-          if (active) setAuthorSigVerified(false);
-          return;
-        }
-        const derivedHash = bundleHashFromAuthorSig(originSig);
-        const originBundleHash = effectiveOriginBundleHash ?? (derivedHash && derivedHash === bundleHash ? derivedHash : null);
-        const candidateHashes = originBundleHash ? [originBundleHash] : [];
-        if (!candidateHashes.length) {
-          if (active) setAuthorSigVerified(false);
-          return;
-        }
-        const ok = await verifyAuthorSigWithFallback(originSig, candidateHashes);
-        if (active) setAuthorSigVerified(ok);
+      if (!isKASAuthorSig(originSig)) {
+        if (active) setProvenanceSigVerified(false);
         return;
       }
-
-      if (!legacySig || !isKASAuthorSig(legacySig)) {
-        if (active) setAuthorSigVerified(false);
+      const derivedHash = bundleHashFromAuthorSig(originSig);
+      const originBundleHash =
+        effectiveOriginBundleHash ?? (derivedHash && derivedHash === bundleHash ? derivedHash : null);
+      const candidateHashes = originBundleHash ? [originBundleHash] : [];
+      if (!candidateHashes.length) {
+        if (active) setProvenanceSigVerified(false);
         return;
       }
-      const authorBundleHash = bundleHashFromAuthorSig(legacySig);
-      const candidateHashes = Array.from(new Set([authorBundleHash, bundleHash].filter(Boolean))) as string[];
-      const ok = await verifyAuthorSigWithFallback(legacySig, candidateHashes);
-      if (active) setAuthorSigVerified(ok);
+      const ok = await verifyAuthorSigWithFallback(originSig, candidateHashes);
+      if (active) setProvenanceSigVerified(ok);
     })();
 
     return () => {
       active = false;
     };
-  }, [bundleHash, embeddedProof?.authorSig, effectiveOriginAuthorSig, effectiveOriginBundleHash]);
+  }, [bundleHash, provenanceAuthorSig, effectiveOriginBundleHash, hasKASProvenanceSig, isReceiveGlyph]);
 
   const receiveCredId = useMemo(() => (effectiveReceiveSig ? effectiveReceiveSig.credId : ""), [effectiveReceiveSig]);
   const receiveNonce = useMemo(() => (effectiveReceiveSig?.nonce ? effectiveReceiveSig.nonce : ""), [effectiveReceiveSig?.nonce]);
   const receiveBundleHash = useMemo(() => effectiveReceiveBundleHash, [effectiveReceiveBundleHash]);
-
-  React.useEffect(() => {
-    if (!identityScanRequested) return;
-    if (!svgText.trim()) {
-      setIdentityScanRequested(false);
-      return;
-    }
-    const authorSig = effectiveOriginAuthorSig ?? embeddedProof?.authorSig;
-    if (!authorSig || !isKASAuthorSig(authorSig)) {
-      setIdentityAttested("missing");
-      setIdentityScanRequested(false);
-      return;
-    }
-    if (!bundleHash) return;
-    void attemptIdentityScan(authorSig, bundleHash);
-  }, [attemptIdentityScan, bundleHash, embeddedProof?.authorSig, effectiveOriginAuthorSig, identityScanRequested, svgText]);
 
   const badge: { kind: BadgeKind; title: string; subtitle?: string } = useMemo(() => {
     if (busy) return { kind: "busy", title: "SEALING", subtitle: "Deterministic proof rails executing." };
@@ -2008,21 +2276,30 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
   }, [effectiveOwnerPhiKey, result]);
   const kpiPhiKey = useMemo(() => effectivePhiKey, [effectivePhiKey]);
 
-  const provenanceSig = useMemo(
-    () => effectiveOriginAuthorSig ?? embeddedProof?.authorSig ?? null,
-    [embeddedProof?.authorSig, effectiveOriginAuthorSig],
-  );
+  const provenanceSig = hasKASProvenanceSig ? provenanceAuthorSig : null;
+  const provenanceSigVerifiedValue = hasKASProvenanceSig ? provenanceSigVerified : null;
+
+  const ownerAuthSignerPresent = hasKASAuthSig && Boolean(effectiveOwnerSig || effectiveReceiveSig);
+  const ownerAuthVerifiedValue = useMemo(() => {
+    if (!hasKASAuthSig) return null;
+    if (effectiveOwnerSig) return ownerAuthVerified;
+    if (effectiveReceiveSig) return receiveSigVerified;
+    return null;
+  }, [effectiveOwnerSig, effectiveReceiveSig, hasKASAuthSig, ownerAuthVerified, receiveSigVerified]);
 
   const sealKAS: SealState = useMemo(() => {
-    if (busy) return "busy";
+    if (!hasKASAuthSig) return "off";
+    if (busy || ownerAuthBusy) return "busy";
+    if (ownerAuthorSig) {
+      if (ownerAuthVerified === null) return "na";
+      return ownerAuthVerified ? "valid" : "invalid";
+    }
     if (effectiveReceiveSig) {
       if (receiveSigVerified === null) return "na";
       return receiveSigVerified ? "valid" : "invalid";
     }
-    if (!provenanceSig) return "off";
-    if (authorSigVerified === null) return "na";
-    return authorSigVerified ? "valid" : "invalid";
-  }, [authorSigVerified, busy, effectiveReceiveSig, provenanceSig, receiveSigVerified]);
+    return "off";
+  }, [busy, hasKASAuthSig, ownerAuthBusy, ownerAuthVerified, ownerAuthorSig, effectiveReceiveSig, receiveSigVerified]);
 
   const sealZK: SealState = useMemo(() => {
     if (busy) return "busy";
@@ -2054,61 +2331,6 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     return `${zkStatementValue.publicInputsContract.arity} • ${zkStatementValue.publicInputsContract.invariant}`;
   }, [zkStatementValue?.publicInputsContract]);
 
-  const verifiedCardData = useMemo<VerifiedCardData | null>(() => {
-    if (result.status !== "ok" || !proofCapsule || !capsuleHash || stewardVerifiedPulse == null) return null;
-    const receiptValue = verificationReceipt ?? embeddedProof?.receipt ?? sharedReceipt?.receipt;
-    const receiptHashValue = receiptHash || embeddedProof?.receiptHash || sharedReceipt?.receiptHash;
-    const verificationSigValue = verificationSig ?? embeddedProof?.verificationSig ?? sharedReceipt?.verificationSig;
-    const valuationValue = valuationSnapshot && valuationHash ? { ...valuationSnapshot, valuationHash } : undefined;
-    return {
-      capsuleHash,
-      pulse: proofCapsule.pulse,
-      verifiedAtPulse: stewardVerifiedPulse,
-      phikey: effectivePhiKey !== "—" ? effectivePhiKey : proofCapsule.phiKey,
-      kasOk: sealKAS === "valid",
-      g16Ok: sealZK === "valid",
-      verifierSlug: proofCapsule.verifierSlug,
-      verifier: verificationSource,
-      verificationVersion,
-      bundleHash: bundleHash || undefined,
-      zkPoseidonHash: zkMeta?.zkPoseidonHash ?? undefined,
-      receipt: receiptValue ?? undefined,
-      receiptHash: receiptHashValue || undefined,
-      verificationSig: verificationSigValue ?? undefined,
-      sigilSvg: svgText.trim() ? svgText : undefined,
-      valuation: valuationValue,
-    };
-  }, [
-    bundleHash,
-    capsuleHash,
-    embeddedProof?.receipt,
-    embeddedProof?.receiptHash,
-    embeddedProof?.verificationSig,
-    proofCapsule,
-    receiptHash,
-    result.status,
-    effectivePhiKey,
-    sealKAS,
-    sealZK,
-    sharedReceipt?.receipt,
-    sharedReceipt?.receiptHash,
-    sharedReceipt?.verificationSig,
-    stewardVerifiedPulse,
-    svgText,
-    valuationHash,
-    valuationSnapshot,
-    verificationReceipt,
-    verificationSig,
-    verificationSource,
-    verificationVersion,
-    zkMeta?.zkPoseidonHash,
-  ]);
-
-  const onDownloadVerifiedCard = useCallback(async () => {
-    if (!verifiedCardData) return;
-    await downloadVerifiedCardPng(verifiedCardData);
-  }, [verifiedCardData]);
-
   const onSignVerification = useCallback(async () => {
     if (!proofCapsule || !receiptHash) return;
     if (verificationSigBusy) return;
@@ -2118,7 +2340,8 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     }
     setVerificationSigBusy(true);
     try {
-      const kasSig = await signBundleHash(proofCapsule.phiKey, receiptHash);
+      const kasPhiKey = effectiveOwnerPhiKey ?? proofCapsule.phiKey;
+      const kasSig = await signBundleHash(kasPhiKey, receiptHash);
       const nextSig = verificationSigFromKas(kasSig);
       const ok = await verifyVerificationSig(receiptHash, nextSig);
       setVerificationSig(nextSig);
@@ -2130,125 +2353,7 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
     } finally {
       setVerificationSigBusy(false);
     }
-  }, [proofCapsule, receiptHash, verificationSigBusy]);
-
-  const onReceiveGlyph = useCallback(async () => {
-    if (!bundleHash || !proofCapsule || !capsuleHash || !svgHash) return;
-    if (receiveBusy) return;
-    if (!isWebAuthnAvailable()) {
-      setNotice("WebAuthn is not available in this browser. Please verify on a device with passkeys enabled.");
-      return;
-    }
-
-    setReceiveBusy(true);
-    try {
-      const receivePulse = currentPulse ?? getKaiPulseEternalInt(new Date());
-      const originSigCandidate = effectiveOriginAuthorSig ?? (embeddedProof?.authorSig ?? null);
-      const originAuthorSig = isKASAuthorSig(originSigCandidate) ? originSigCandidate : null;
-      const originBundleHash = effectiveOriginBundleHash ?? bundleHash;
-      const receiveBundleSeed: ProofBundleLike = {
-        hashAlg: embeddedProof?.hashAlg ?? PROOF_HASH_ALG,
-        canon: embeddedProof?.canon ?? PROOF_CANON,
-        bindings: embeddedProof?.bindings ?? PROOF_BINDINGS,
-        zkStatement: embeddedProof?.zkStatement,
-        bundleRoot: bundleRoot ?? embeddedProof?.bundleRoot,
-        zkMeta: embeddedProof?.zkMeta,
-        proofCapsule,
-        capsuleHash,
-        svgHash,
-        zkPoseidonHash: zkMeta?.zkPoseidonHash ?? undefined,
-        zkProof: zkMeta?.zkProof ?? undefined,
-        zkPublicInputs: zkMeta?.zkPublicInputs ?? undefined,
-      };
-      const receiveBundleRoot = buildReceiveBundleRoot({
-        bundleRoot: bundleRoot ?? embeddedProof?.bundleRoot ?? undefined,
-        bundle: receiveBundleSeed,
-        originBundleHash,
-        originAuthorSig,
-        receivePulse,
-      });
-      const receiveBundleHash = await hashReceiveBundleRoot(receiveBundleRoot);
-      const passkey = await ensureReceiverPasskey();
-      const { nonce, challengeBytes } = await buildKasChallenge("receive", receiveBundleHash);
-      const assertion = await getWebAuthnAssertionJson({
-        challenge: challengeBytes,
-        allowCredIds: [passkey.credId],
-        preferInternal: true,
-      });
-      const ok = await verifyWebAuthnAssertion({
-        assertion,
-        expectedChallenge: challengeBytes,
-        pubKeyJwk: passkey.pubKeyJwk,
-        expectedCredId: passkey.credId,
-      });
-      if (!ok) {
-        setNotice("Receive signature invalid.");
-        return;
-      }
-
-      const nextSig: ReceiveSig = {
-        v: "KRS-1",
-        alg: "webauthn-es256",
-        nonce,
-        binds: { bundleHash: receiveBundleHash },
-        createdAtPulse: receivePulse,
-        credId: passkey.credId,
-        pubKeyJwk: passkey.pubKeyJwk as ReceiveSig["pubKeyJwk"],
-        assertion,
-      };
-
-      const ownerPhiKey = await deriveOwnerPhiKeyFromReceive({
-        receiverPubKeyJwk: nextSig.pubKeyJwk,
-        receivePulse,
-        receiveBundleHash,
-      });
-      const ownerKeyDerivation = buildOwnerKeyDerivation({
-        originPhiKey: proofCapsule?.phiKey,
-        receivePulse,
-        receiveBundleHash,
-      });
-
-      setReceiveSig(nextSig);
-      setReceiveSigVerified(true);
-      setLocalReceiveBundle({
-        mode: "receive",
-        originBundleHash,
-        receiveBundleHash,
-        originAuthorSig,
-        receiveSig: nextSig,
-        receivePulse,
-        ownerPhiKey,
-        ownerKeyDerivation,
-      });
-      setNotice("Receive signature recorded.");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Receive claim canceled.";
-      setNotice(msg);
-    } finally {
-      setReceiveBusy(false);
-    }
-  }, [
-    bundleHash,
-    bundleRoot,
-    capsuleHash,
-    currentPulse,
-    effectiveOriginAuthorSig,
-    effectiveOriginBundleHash,
-    embeddedProof?.authorSig,
-    embeddedProof?.bindings,
-    embeddedProof?.bundleRoot,
-    embeddedProof?.canon,
-    embeddedProof?.hashAlg,
-    embeddedProof?.zkMeta,
-    embeddedProof?.zkStatement,
-    proofCapsule?.phiKey,
-    proofCapsule,
-    receiveBusy,
-    svgHash,
-    zkMeta?.zkPoseidonHash,
-    zkMeta?.zkProof,
-    zkMeta?.zkPublicInputs,
-  ]);
+  }, [effectiveOwnerPhiKey, proofCapsule, receiptHash, verificationSigBusy]);
 
   const sealStateLabel = useCallback((state: SealState): string => {
     switch (state) {
@@ -2281,6 +2386,7 @@ body: [
       };
     }
     if (sealPopover === "kas") {
+      if (!hasKASAuthSig) return null;
       return {
         title: "KAS • Kai Author Signature",
         status: sealStateLabel(sealKAS),
@@ -2302,21 +2408,11 @@ body: [
   "This seal represents cryptographic finality—provable integrity with privacy preserved."
       ],
     };
-  }, [result.status, sealKAS, sealPopover, sealStateLabel, sealZK]);
+  }, [hasKASAuthSig, result.status, sealKAS, sealPopover, sealStateLabel, sealZK]);
 
   const hasSvgBytes = Boolean(svgText.trim());
   const expectedSvgHash = sharedReceipt?.svgHash ?? embeddedProof?.svgHash ?? "";
-  const hasKasIdentity = Boolean(provenanceSig && isKASAuthorSig(provenanceSig));
-  const identityStatusLabel =
-    !hasSvgBytes || !hasKasIdentity
-      ? "Not present"
-      : identityScanBusy
-        ? "Aligning…"
-        : identityAttested === true
-          ? "Present (Verified)"
-          : identityAttested === false
-            ? "Not verified"
-            : "Alignment required";
+  const identityStatusLabel = hasKASOwnerSig ? ownerAuthStatus || "Not present" : "";
   const artifactStatusLabel =
     artifactAttested === true
       ? "Present (Verified)"
@@ -2342,19 +2438,21 @@ body: [
 
   const shareStatus = result.status === "ok" ? "VERIFIED" : result.status === "error" ? "FAILED" : "STANDBY";
   const sharePhiShort = verifierPhi && verifierPhi !== "—" ? ellipsizeMiddle(verifierPhi, 12, 10) : "—";
-  const shareKas = sealKAS === "valid" ? "✅" : "❌";
+  const shareKas = hasKASAuthSig ? (sealKAS === "valid" ? "✅" : "❌") : null;
   const shareG16 = sealZK === "valid" ? "✅" : "❌";
   const verificationSigLabel =
     verificationSigVerified === true ? "Verification signed" : verificationSigVerified === false ? "Verification signature invalid" : "Sign Verification";
   const canSignVerification = Boolean(receiptHash && proofCapsule);
-  const canReceiveGlyph = Boolean(bundleHash && result.status === "ok");
-  const receiveActionLabel = effectiveReceiveSig ? "Ownership received" : "Receive / Accept Glyph";
 
   const stewardPulseLabel =
     stewardVerifiedPulse == null ? "Verified pulse unavailable (legacy bundle)" : `Steward Verified @ Pulse ${stewardVerifiedPulse}`;
 
   React.useEffect(() => {
     let active = true;
+    if (!hasKASReceiveSig) {
+      setReceiveSigVerified(null);
+      return;
+    }
     if (!effectiveReceiveSig) {
       setReceiveSigVerified(null);
       return;
@@ -2380,7 +2478,7 @@ body: [
     return () => {
       active = false;
     };
-  }, [effectiveReceiveBundleHash, effectiveReceiveSig]);
+  }, [effectiveReceiveBundleHash, effectiveReceiveSig, hasKASReceiveSig]);
 
 
   React.useEffect(() => {
@@ -2425,8 +2523,8 @@ React.useEffect(() => {
   };
 }, [bundleHash, cacheVerificationVersion, zkMeta?.zkPoseidonHash]);
 
-  const auditBundleText = useMemo(() => {
-    if (!proofCapsule) return "";
+  const auditBundlePayload = useMemo<AuditBundlePayload | null>(() => {
+    if (!proofCapsule) return null;
     const transport = {
       shareUrl: embeddedProof?.transport?.shareUrl ?? embeddedProof?.shareUrl,
       verifierUrl: embeddedProof?.transport?.verifierUrl ?? proofVerifierUrl,
@@ -2446,7 +2544,7 @@ React.useEffect(() => {
           ...(zkVerifiedCached ? { zkVerifiedCached: true } : {}),
         }
       : embeddedProof?.verificationCache ?? sharedReceipt?.verificationCache;
-    const authorSigForExport = effectiveReceiveMode === "receive" || effectiveOriginAuthorSig ? null : embeddedProof?.authorSig ?? null;
+    const authorSigForExport = embeddedProof?.authorSig ?? null;
     const normalized = normalizeBundle({
       hashAlg: PROOF_HASH_ALG,
       canon: PROOF_CANON,
@@ -2469,7 +2567,7 @@ React.useEffect(() => {
       mode: effectiveReceiveMode,
       originBundleHash: effectiveOriginBundleHash,
       receiveBundleHash: effectiveReceiveBundleHash,
-      originAuthorSig: effectiveOriginAuthorSig ?? null,
+      originAuthorSig: provenanceAuthorSig ?? null,
       receiveSig: effectiveReceiveSig ?? null,
       receivePulse: effectiveReceivePulse ?? undefined,
       ownerPhiKey: effectiveOwnerPhiKey ?? undefined,
@@ -2487,15 +2585,20 @@ React.useEffect(() => {
       transport,
     });
 
-    const withZkVerified = typeof zkVerified === "boolean" ? { ...normalized, zkVerified } : normalized;
-    return JSON.stringify(withZkVerified, null, 2);
+    const verifiedAtPulseValue =
+      typeof transport.verifiedAtPulse === "number" && Number.isFinite(transport.verifiedAtPulse)
+        ? transport.verifiedAtPulse
+        : stewardVerifiedPulse ?? undefined;
+    const withPulse =
+      typeof verifiedAtPulseValue === "number" ? { ...normalized, verifiedAtPulse: verifiedAtPulseValue } : normalized;
+    return typeof zkVerified === "boolean" ? { ...withPulse, zkVerified } : withPulse;
   }, [
     proofCapsule,
     capsuleHash,
     svgHash,
     bundleHash,
     embeddedProof,
-    effectiveOriginAuthorSig,
+    provenanceAuthorSig,
     effectiveOriginBundleHash,
     effectiveOwnerKeyDerivation,
     effectiveOwnerPhiKey,
@@ -2520,6 +2623,82 @@ React.useEffect(() => {
     verificationSig,
     zkVerifiedCached,
   ]);
+
+  const auditBundleText = useMemo(() => {
+    if (!auditBundlePayload) return "";
+    return JSON.stringify(auditBundlePayload, null, 2);
+  }, [auditBundlePayload]);
+
+  const proofBundleJson = useMemo(() => {
+    if (!auditBundlePayload) return "";
+    return JSON.stringify(auditBundlePayload);
+  }, [auditBundlePayload]);
+
+  const verifiedCardData = useMemo<VerifiedCardData | null>(() => {
+    if (result.status !== "ok" || !proofCapsule || !capsuleHash || stewardVerifiedPulse == null) return null;
+    const receiptValue = verificationReceipt ?? embeddedProof?.receipt ?? sharedReceipt?.receipt;
+    const receiptHashValue = receiptHash || embeddedProof?.receiptHash || sharedReceipt?.receiptHash;
+    const verificationSigValue = verificationSig ?? embeddedProof?.verificationSig ?? sharedReceipt?.verificationSig;
+    const valuationValue = valuationSnapshot && valuationHash ? { ...valuationSnapshot, valuationHash } : undefined;
+    const ownerPhiKeyValue = effectiveOwnerPhiKey ?? effectivePhiKey;
+    const verifierUrlValue = proofVerifierUrl || currentVerifyUrl;
+    return {
+      capsuleHash,
+      svgHash: svgHash || undefined,
+      pulse: proofCapsule.pulse,
+      verifiedAtPulse: stewardVerifiedPulse,
+      phikey: ownerPhiKeyValue && ownerPhiKeyValue !== "—" ? ownerPhiKeyValue : proofCapsule.phiKey,
+      kasOk: hasKASAuthSig ? sealKAS === "valid" : undefined,
+      g16Ok: sealZK === "valid",
+      verifierSlug: proofCapsule.verifierSlug,
+      verifierUrl: verifierUrlValue || undefined,
+      verifier: verificationSource,
+      verificationVersion,
+      bundleHash: bundleHash || undefined,
+      zkPoseidonHash: zkMeta?.zkPoseidonHash ?? undefined,
+      receipt: receiptValue ?? undefined,
+      receiptHash: receiptHashValue || undefined,
+      verificationSig: verificationSigValue ?? undefined,
+      sigilSvg: svgText.trim() ? svgText : undefined,
+      valuation: valuationValue,
+      proofBundleJson: proofBundleJson || undefined,
+    };
+  }, [
+    bundleHash,
+    capsuleHash,
+    currentVerifyUrl,
+    embeddedProof?.receipt,
+    embeddedProof?.receiptHash,
+    embeddedProof?.verificationSig,
+    effectiveOwnerPhiKey,
+    proofCapsule,
+    proofBundleJson,
+    proofVerifierUrl,
+    receiptHash,
+    result.status,
+    effectivePhiKey,
+    hasKASAuthSig,
+    sealKAS,
+    sealZK,
+    sharedReceipt?.receipt,
+    sharedReceipt?.receiptHash,
+    sharedReceipt?.verificationSig,
+    stewardVerifiedPulse,
+    svgHash,
+    svgText,
+    valuationHash,
+    valuationSnapshot,
+    verificationReceipt,
+    verificationSig,
+    verificationSource,
+    verificationVersion,
+    zkMeta?.zkPoseidonHash,
+  ]);
+
+  const onDownloadVerifiedCard = useCallback(async () => {
+    if (!verifiedCardData) return;
+    await downloadVerifiedCardPng(verifiedCardData);
+  }, [verifiedCardData]);
 
   const receiptJson = useMemo(() => {
     if (!proofCapsule) return "";
@@ -2555,12 +2734,12 @@ React.useEffect(() => {
     if (effectiveReceiveBundleHash) extended.receiveBundleHash = effectiveReceiveBundleHash;
     const shareUrlValue = embeddedProof?.transport?.shareUrl ?? embeddedProof?.shareUrl;
     if (shareUrlValue) extended.shareUrl = shareUrlValue;
-    if (effectiveOriginAuthorSig) extended.originAuthorSig = effectiveOriginAuthorSig;
+    if (provenanceAuthorSig) extended.originAuthorSig = provenanceAuthorSig;
     if (effectiveReceiveSig) extended.receiveSig = effectiveReceiveSig;
     if (effectiveReceivePulse != null) extended.receivePulse = effectiveReceivePulse;
     if (effectiveOwnerPhiKey) extended.ownerPhiKey = effectiveOwnerPhiKey;
     if (effectiveOwnerKeyDerivation) extended.ownerKeyDerivation = effectiveOwnerKeyDerivation;
-    if (embeddedProof?.authorSig && !effectiveOriginAuthorSig && effectiveReceiveMode !== "receive") {
+    if (embeddedProof?.authorSig) {
       extended.authorSig = embeddedProof.authorSig;
     }
     if (embeddedProof?.zkProof) extended.zkProof = embeddedProof.zkProof;
@@ -2594,7 +2773,7 @@ React.useEffect(() => {
     embeddedProof?.authorSig,
     embeddedProof?.zkProof,
     embeddedProof?.zkPublicInputs,
-    effectiveOriginAuthorSig,
+    provenanceAuthorSig,
     effectiveOriginBundleHash,
     effectiveOwnerKeyDerivation,
     effectiveOwnerPhiKey,
@@ -2632,7 +2811,8 @@ React.useEffect(() => {
   const onShareReceipt = useCallback(async () => {
     const url = shareReceiptUrl || proofVerifierUrl || currentVerifyUrl;
     const title = `Proof of Breath™ — ${shareStatus}`;
-    const text = `${shareStatus} • Pulse ${verifierPulse} • ΦKey ${sharePhiShort} • KAS ${shareKas} • G16 ${shareG16}`;
+    const kasSegment = shareKas ? ` • KAS ${shareKas}` : "";
+    const text = `${shareStatus} • Pulse ${verifierPulse} • ΦKey ${sharePhiShort}${kasSegment} • G16 ${shareG16}`;
 
     if (navigator.share) {
       try {
@@ -2719,13 +2899,21 @@ React.useEffect(() => {
           </div>
 
           <div className="vseals" aria-label="Sovereign seals">
-            <SealPill
-              label="KAS"
-              state={sealKAS}
-              detail={provenanceSig ? "Origin author seal (WebAuthn KAS)" : "No author seal present"}
-              onClick={openKasPopover}
-              ariaLabel="Open KAS attestation details"
-            />
+            {hasKASAuthSig ? (
+              <SealPill
+                label="KAS"
+                state={sealKAS}
+                detail={
+                  effectiveOwnerSig
+                    ? "Owner/auth signer (WebAuthn KAS)"
+                    : effectiveReceiveSig
+                      ? "Owner receive signer (WebAuthn KAS)"
+                      : "Owner/auth signer missing"
+                }
+                onClick={openKasPopover}
+                ariaLabel="Open KAS attestation details"
+              />
+            ) : null}
             <SealPill
               label="G16"
               state={sealZK}
@@ -2769,16 +2957,6 @@ React.useEffect(() => {
                   disabled={!canSignVerification || verificationSigBusy}
                 >
                   ✍
-                </button>
-                <button
-                  type="button"
-                  className="vbtn vbtn--ghost"
-                  onClick={() => void onReceiveGlyph()}
-                  title={receiveActionLabel}
-                  aria-label={receiveActionLabel}
-                  disabled={!canReceiveGlyph || receiveBusy || Boolean(effectiveReceiveSig)}
-                >
-                  🜁
                 </button>
                 <button type="button" className="vbtn vbtn--ghost" onClick={() => void onDownloadVerifiedCard()}>
                   ⬇
@@ -2881,6 +3059,16 @@ React.useEffect(() => {
                       e.currentTarget.value = "";
                     }}
                   />
+                  <input
+                    ref={pngFileRef}
+                    className="vfile"
+                    type="file"
+                    accept=".png,image/png"
+                    onChange={(e) => {
+                      handleFiles(e.currentTarget.files);
+                      e.currentTarget.value = "";
+                    }}
+                  />
 
                   <div className="vgrid-2 vgrid-2--inhale">
                     {/* Control FIRST on mobile (CSS reorders) */}
@@ -2901,6 +3089,87 @@ React.useEffect(() => {
                           <span className="vdrop-mark-txt">ΦKey</span>
                         </span>
                       </button>
+                      <button
+                        type="button"
+                        className="vdrop vdrop--receipt"
+                        aria-label="Verify SigilSeal PNG"
+                        title="Verify SigilSeal PNG"
+                        onClick={() => pngFileRef.current?.click()}
+                      >
+<span className="vdrop-ic" aria-hidden="true">
+  <svg
+    className="vdrop-seal"
+    viewBox="0 0 64 64"
+    width="22"
+    height="22"
+    role="presentation"
+    focusable="false"
+  >
+    {/* Outer ring */}
+    <circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.9" />
+    <circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.55" />
+
+    {/* Ticks */}
+    {Array.from({ length: 16 }).map((_, i) => {
+      const a = (i * Math.PI * 2) / 16;
+      const x1 = 32 + Math.cos(a) * 24;
+      const y1 = 32 + Math.sin(a) * 24;
+      const x2 = 32 + Math.cos(a) * 26;
+      const y2 = 32 + Math.sin(a) * 26;
+      return (
+        <line
+          key={i}
+          x1={x1}
+          y1={y1}
+          x2={x2}
+          y2={y2}
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          opacity="0.85"
+        />
+      );
+    })}
+
+    {/* Inner “breath” rosette */}
+    <path
+      d="M32 16
+         C38 16 44 22 44 28
+         C44 34 38 40 32 40
+         C26 40 20 34 20 28
+         C20 22 26 16 32 16
+         Z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      opacity="0.8"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M32 22
+         C35.5 22 39 25.5 39 29
+         C39 32.5 35.5 36 32 36
+         C28.5 36 25 32.5 25 29
+         C25 25.5 28.5 22 32 22
+         Z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      opacity="0.7"
+      strokeLinejoin="round"
+    />
+
+    {/* Center dot */}
+    <circle cx="32" cy="32" r="2.2" fill="currentColor" opacity="0.9" />
+  </svg>
+</span>
+<span className="vdrop-txt">Proof Of Breath™</span>
+<span className="vdrop-mark">
+  <span className="vdrop-mark-txt">Sigil-Seal</span>
+</span>
+
+
+                      </button>
 
                       <div className="vcontrol-row" aria-label="Quick actions">
                         <IconBtn icon="⟡" title={busy ? "Verifying…" : "Verify"} ariaLabel="Verify" onClick={() => void runVerify()} disabled={busy} kind="primary" />
@@ -2916,13 +3185,19 @@ React.useEffect(() => {
                             setResult({ status: "idle" });
                             setNotice("");
                           }}
-                          disabled={!svgText.trim()}
+                          disabled={!svgText.trim() && !sharedReceipt}
                         />
                       </div>
-                     <div className="vmini-grid vmini-grid--2" aria-label="Attestation status">
-                <MiniField label="Identity (Owner)" value={identityStatusLabel} />
-                <MiniField label="Sigil-Glyph (Artifact)" value={artifactStatusLabel} />
-              </div>
+                      {hasKASOwnerSig ? (
+                        <div className="vmini-grid vmini-grid--2" aria-label="Attestation status">
+                          <MiniField label="Identity (Steward)" value={identityStatusLabel} />
+                          <MiniField label="Sigil-Glyph (Artifact)" value={artifactStatusLabel} />
+                        </div>
+                      ) : (
+                        <div className="vmini-grid vmini-grid--2" aria-label="Attestation status">
+                          <MiniField label="Sigil-Glyph (Artifact)" value={artifactStatusLabel} />
+                        </div>
+                      )}
                       <div className="vmini-grid vmini-grid--2" aria-label="Quick readout">
                         <MiniField label="Inhaled" value={svgText.trim() ? "true" : "false"} />
                         <MiniField label="Attestation" value={embeddedProof ? "present" : "—"} />
@@ -2946,7 +3221,7 @@ React.useEffect(() => {
                   </div>
 
                   <div className="vdropzone-hint" aria-hidden="true">
-                    Drag & drop ΦKey anywhere in this panel
+                    Drag & drop ΦKey or receipt PNG anywhere in this panel
                   </div>
                 </div>
 
@@ -3119,29 +3394,27 @@ React.useEffect(() => {
                   </div>
                 </div>
 
+                {result.status === "ok" && displayPhi != null ? (
+                  <div className="vmini-grid vmini-grid--2 vvaluation-dashboard" aria-label="Live valuation">
+                    <MiniField
+                      label={displaySource === "balance" ? "Glyph Φ balance" : displaySource === "embedded" ? "Glyph Φ value" : "Live Φ value"}
+                      value={fmtPhi(displayPhi)}
+                      onClick={() => openChartPopover("phi")}
+                      ariaLabel="Open live chart for Φ value"
+                    />
+                    <MiniField
+                      label={displaySource === "balance" ? "Glyph USD balance" : displaySource === "embedded" ? "Glyph USD value" : "Live USD value"}
+                      value={displayUsd == null ? "—" : fmtUsd(displayUsd)}
+                      onClick={displayUsd == null ? undefined : () => openChartPopover("usd")}
+                      ariaLabel="Open live chart for USD value"
+                    />
+                  </div>
+                ) : null}
 
-
-              {result.status === "ok" && displayPhi != null ? (
-                <div className="vmini-grid vmini-grid--2 vvaluation-dashboard" aria-label="Live valuation">
-                  <MiniField
-                    label={displaySource === "balance" ? "Glyph Φ balance" : displaySource === "embedded" ? "Glyph Φ value" : "Live Φ value"}
-                    value={fmtPhi(displayPhi)}
-                    onClick={() => openChartPopover("phi")}
-                    ariaLabel="Open live chart for Φ value"
-                  />
-                  <MiniField
-                    label={displaySource === "balance" ? "Glyph USD balance" : displaySource === "embedded" ? "Glyph USD value" : "Live USD value"}
-                    value={displayUsd == null ? "—" : fmtUsd(displayUsd)}
-                    onClick={displayUsd == null ? undefined : () => openChartPopover("usd")}
-                    ariaLabel="Open live chart for USD value"
-                  />
-                </div>
-              ) : null}
-
-              <div className="vfoot" aria-label="Proof actions">
-                <div className="vfoot-left">
-                  <div className="vchip" title="Canonical audit payload">
-                    Audit JSON
+                <div className="vfoot" aria-label="Proof actions">
+                  <div className="vfoot-left">
+                    <div className="vchip" title="Canonical audit payload">
+                      Audit JSON
                     </div>
                   </div>
                   <div className="vfoot-right">
@@ -3236,27 +3509,55 @@ React.useEffect(() => {
               <div className="vcard-body vfit">
                 <div className="vmini-grid vmini-grid--6" aria-label="Audit checks">
                   <MiniField label="Attestation bundle" value={embeddedProof ? "present" : "—"} />
-                  <MiniField label="Origin author signature" value={provenanceSig ? "present" : "—"} />
-                  <MiniField label="Origin author verified" value={authorSigVerified === null ? "n/a" : authorSigVerified ? "true" : "false"} />
-                  <MiniField label="Owner receive signature" value={effectiveReceiveSig ? "present" : "—"} />
-                  <MiniField label="Owner receive verified" value={receiveSigVerified === null ? "n/a" : receiveSigVerified ? "true" : "false"} />
-                  <MiniField label="Owner ΦKey" value={effectiveOwnerPhiKey ? "present" : "—"} />
-                  <MiniField label="Owner ΦKey verified" value={ownerPhiKeyVerified === null ? "n/a" : ownerPhiKeyVerified ? "true" : "false"} />
-                  <MiniField label="Ownership attested" value={ownershipAttested === "missing" ? "missing" : ownershipAttested ? "true" : "false"} />
+                  {hasKASOwnerSig ? (
+                    <MiniField label="Owner/Auth signer" value={ownerAuthSignerPresent ? "present" : "—"} />
+                  ) : null}
+                  {hasKASOwnerSig ? (
+                    <MiniField
+                      label="Owner/Auth verified"
+                      value={ownerAuthVerifiedValue === null ? "n/a" : ownerAuthVerifiedValue ? "true" : "false"}
+                    />
+                  ) : null}
+                  {!isReceiveGlyph && hasKASProvenanceSig ? (
+                    <MiniField label="Provenance/Origin signature" value={provenanceSig ? "present" : "—"} />
+                  ) : null}
+                  {!isReceiveGlyph && hasKASProvenanceSig ? (
+                    <MiniField
+                      label="Provenance/Origin verified"
+                      value={provenanceSigVerifiedValue === null ? "n/a" : provenanceSigVerifiedValue ? "true" : "false"}
+                    />
+                  ) : null}
+                  {hasKASReceiveSig && isReceiveGlyph ? (
+                    <MiniField label="Owner receive signature" value={effectiveReceiveSig ? "present" : "—"} />
+                  ) : null}
+                  {hasKASReceiveSig && isReceiveGlyph ? (
+                    <MiniField label="Owner receive verified" value={receiveSigVerified === null ? "n/a" : receiveSigVerified ? "true" : "false"} />
+                  ) : null}
+                  {hasKASAuthSig ? (
+                    <MiniField label="Owner ΦKey" value={effectiveOwnerPhiKey ? "present" : "—"} />
+                  ) : null}
+                  {hasKASAuthSig ? (
+                    <MiniField label="Owner ΦKey verified" value={ownerPhiKeyVerified === null ? "n/a" : ownerPhiKeyVerified ? "true" : "false"} />
+                  ) : null}
+                  {hasKASAuthSig ? (
+                    <MiniField label="Ownership attested" value={ownershipAttested === "missing" ? "missing" : ownershipAttested ? "true" : "false"} />
+                  ) : null}
                   <MiniField label="sigilHash parity" value={embeddedProof?.svgHash ? String(embeddedProof.svgHash === svgHash) : "n/a"} />
                   <MiniField label="vesselHash parity" value={embeddedProof?.capsuleHash ? String(embeddedProof.capsuleHash === capsuleHash) : "n/a"} />
                   <MiniField label="bundleHash parity" value={embeddedProof?.bundleHash ? String(embeddedProof.bundleHash === bundleHash) : "n/a"} />
                 </div>
 
-                <div className="vmini-grid vmini-grid--3" aria-label="Receive signature status">
-                  <MiniField
-                    label="Receive credId"
-                    value={receiveCredId ? ellipsizeMiddle(receiveCredId, 12, 10) : "—"}
-                    title={receiveCredId || "—"}
-                  />
-                </div>
+                {hasKASReceiveSig && isReceiveGlyph ? (
+                  <div className="vmini-grid vmini-grid--3" aria-label="Receive signature status">
+                    <MiniField
+                      label="Receive credId"
+                      value={receiveCredId ? ellipsizeMiddle(receiveCredId, 12, 10) : "—"}
+                      title={receiveCredId || "—"}
+                    />
+                  </div>
+                ) : null}
 
-                {effectiveReceiveSig ? (
+                {hasKASReceiveSig && isReceiveGlyph && effectiveReceiveSig ? (
                   <div className="vmini-grid vmini-grid--2" aria-label="Receive signature summary">
                     <MiniField
                       label="Receive nonce"
@@ -3270,7 +3571,7 @@ React.useEffect(() => {
                 <div className="vfoot" aria-label="Audit actions">
                   <div className="vfoot-left">
                     <div className="vseals" aria-label="Seal summary">
-                      <SealPill label="KAS" state={sealKAS} />
+                      {hasKASAuthSig ? <SealPill label="KAS" state={sealKAS} /> : null}
                       <SealPill label="G16" state={sealZK} />
                     </div>
                   </div>
