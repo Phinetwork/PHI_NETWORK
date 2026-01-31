@@ -1,6 +1,22 @@
 // src/components/ExhaleNote.tsx
 /* eslint-disable @typescript-eslint/consistent-type-assertions */
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+/**
+ * ExhaleNote — Exhale Note Composer
+ * v26.3 — GUIDED STEP COMPOSER + SEND AMOUNT UNIT TOGGLE (Φ ⇄ USD)
+ * - Same valuation/lock/print/save logic
+ * - Guided mode is truly step-by-step:
+ *   - Answer box is TOP (next to Send Amount)
+ *   - Chat shows past Q/A + current question only (no future questions)
+ *   - No bottom composer
+ * - Send Amount now supports unit toggle:
+ *   - Enter Φ or USD (toggle)
+ *   - Always computes the exact paired value
+ *   - Uses locked USD/Φ rate after Render (valuation locked)
+ * - Premium Atlantean-glass header: one-row crystalline icon pills (mobile-first)
+ * - Fix: `disabled` always receives boolean (no `locked` object leaks)
+ * - Terminology: UI says “note” (not “bill”)
+ */
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import type { ValueSeal } from "../utils/valuation";
 import { computeIntrinsicUnsigned } from "../utils/valuation";
@@ -13,9 +29,12 @@ import { renderPreview } from "./exhale-note/dom";
 import { buildBanknoteSVG } from "./exhale-note/banknoteSvg";
 import buildProofPagesHTML from "./exhale-note/proofPages";
 import { printWithTempTitle, renderIntoPrintRoot } from "./exhale-note/printer";
-import { fPhi, fUsd, fTiny } from "./exhale-note/format";
+import { fUsd, fTiny } from "./exhale-note/format";
 import { fetchFromVerifierBridge } from "./exhale-note/bridge";
 import { svgStringToPngBlob, triggerDownload } from "./exhale-note/svgToPng";
+import { insertPngTextChunks } from "../utils/pngChunks";
+import { buildVerifierUrl } from "./KaiVoh/verifierProof";
+import { derivePhiKeyFromSig } from "./VerifierStamper/sigilUtils";
 
 import type {
   NoteProps,
@@ -23,6 +42,8 @@ import type {
   IntrinsicUnsigned,
   MaybeUnsignedSeal,
   ExhaleNoteRenderPayload,
+  NoteSendPayload,
+  NoteSendResult,
 } from "./exhale-note/types";
 
 /* External stylesheet */
@@ -58,7 +79,6 @@ function makeFileTitle(kaiSig: string, pulse: string, stamp: string): string {
       .replace(/-+/g, "-")
       .slice(0, 180);
 
-  // ✅ “KAI + pulse” first (matches how you want it named)
   return `KAI-${safe(pulse)}-SIGIL-${safe(serialCore)}—VAL-${safe(stamp)}`;
 }
 
@@ -66,6 +86,45 @@ function formatPhiParts(val: number): { int: string; frac: string } {
   const s = fTiny(val);
   const [i, f] = s.includes(".") ? s.split(".") : [s, ""];
   return { int: i, frac: f ? `.${f}` : "" };
+}
+
+function parsePhiInput(raw: string): number | null {
+  const cleaned = raw.replace(/,/g, ".").trim();
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Number(num.toFixed(6));
+}
+
+function parseUsdInput(raw: string): number | null {
+  let cleaned = raw.trim().replace(/\$/g, "").replace(/\s+/g, "");
+  if (!cleaned) return null;
+
+  // If user typed "10,5" (comma as decimal), and there's no dot, treat comma as decimal.
+  if (cleaned.includes(",") && !cleaned.includes(".")) cleaned = cleaned.replace(/,/g, ".");
+  else cleaned = cleaned.replace(/,/g, "");
+
+  const num = Number(cleaned);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Number(num.toFixed(6));
+}
+
+function formatUsdInput(val: number): string {
+  if (!Number.isFinite(val) || val <= 0) return "";
+  // Input-friendly numeric string (no $), stable for toggles.
+  return val.toFixed(2);
+}
+
+function generateNonce(): string {
+  if (typeof crypto === "undefined" || !("getRandomValues" in crypto)) {
+    return `${Date.now()}${Math.random().toString(16).slice(2)}`;
+  }
+  return crypto.getRandomValues(new Uint32Array(3)).join("");
+}
+
+function toScaledPhi18(amountPhi: number): string {
+  const safe = Number.isFinite(amountPhi) ? amountPhi : 0;
+  return safe.toFixed(18).replace(".", "");
 }
 
 /** Wait two animation frames to guarantee paint before print */
@@ -110,6 +169,102 @@ function resolveVerifyUrl(raw: string | undefined, fallbackAbs: string): string 
   return candidate;
 }
 
+type NoteProofBundleFields = {
+  verifierUrl?: string;
+  bundleHash?: string;
+  receiptHash?: string;
+  verifiedAtPulse?: number;
+  capsuleHash?: string;
+  svgHash?: string;
+  proofCapsule?: {
+    pulse?: number;
+    kaiSignature?: string;
+  };
+};
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+
+function parseProofBundleJson(raw: string | undefined): NoteProofBundleFields {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isPlainRecord(parsed)) return {};
+    let proofCapsule: NoteProofBundleFields["proofCapsule"];
+    const capsuleRaw = parsed.proofCapsule;
+    if (isPlainRecord(capsuleRaw)) {
+      const pulse = readOptionalNumber(capsuleRaw.pulse);
+      const kaiSignature = readOptionalString(capsuleRaw.kaiSignature);
+      if (pulse != null || kaiSignature) proofCapsule = { pulse: pulse ?? undefined, kaiSignature };
+    }
+    return {
+      verifierUrl: readOptionalString(parsed.verifierUrl),
+      bundleHash: readOptionalString(parsed.bundleHash),
+      receiptHash: readOptionalString(parsed.receiptHash),
+      verifiedAtPulse: readOptionalNumber(parsed.verifiedAtPulse),
+      capsuleHash: readOptionalString(parsed.capsuleHash),
+      svgHash: readOptionalString(parsed.svgHash),
+      proofCapsule,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function buildQrPayload(
+  input: {
+    verifyUrl?: string;
+    proofBundleJson?: string;
+    kaiSignature?: string;
+    pulse?: number;
+    verifiedAtPulse?: number;
+  },
+  fallbackAbs: string
+): string {
+  return resolveNoteVerifyUrl(input, fallbackAbs);
+}
+
+function resolveNoteVerifyUrl(
+  input: {
+    verifyUrl?: string;
+    proofBundleJson?: string;
+    kaiSignature?: string;
+    pulse?: number;
+    verifiedAtPulse?: number;
+  },
+  fallbackAbs: string
+): string {
+  const parsed = parseProofBundleJson(input.proofBundleJson);
+  const preferred = parsed.verifierUrl ?? input.verifyUrl;
+  const resolved = resolveVerifyUrl(preferred, fallbackAbs);
+  const hasSlug = /\/verify\/[^/?#]+/i.test(resolved);
+  if (hasSlug) return resolved;
+
+  const pulse = parsed.proofCapsule?.pulse ?? input.pulse;
+  const sig = parsed.proofCapsule?.kaiSignature ?? input.kaiSignature;
+  const verifiedAtPulse = parsed.verifiedAtPulse ?? input.verifiedAtPulse;
+  if (pulse != null && sig) {
+    const base = /\/verify\/?$/i.test(resolved) ? resolved : undefined;
+    const built = buildVerifierUrl(pulse, sig, base, verifiedAtPulse);
+    return resolveVerifyUrl(built, fallbackAbs);
+  }
+
+  return resolved;
+}
+
 /** Inject preview CSS once so the SVG scales on mobile (kept defensive even if ExhaleNote.css exists). */
 function ensurePreviewStylesInjected(): void {
   if (typeof document === "undefined") return;
@@ -120,12 +275,6 @@ function ensurePreviewStylesInjected(): void {
   style.textContent = `
     .kk-note-preview { width: 100%; max-width: 980px; margin: 0 auto; }
     .kk-note-preview svg { display:block; width:100% !important; height:auto !important; }
-    .kk-hero .kk-value-row { display:flex; gap:16px; align-items:flex-start; }
-    @media (max-width: 860px) {
-      .kk-hero .kk-value-row { flex-direction:column; }
-      .kk-cta { width:100%; }
-      .kk-cta .kk-cta-actions { display:flex; gap:8px; flex-wrap:wrap; }
-    }
   `;
   document.head.appendChild(style);
 }
@@ -339,11 +488,7 @@ function safeJsonStringify(v: unknown): string {
 
 function buildMinimalForStamp(u: IntrinsicUnsigned): MinimalValuationStamp {
   type HeadRefLike = {
-    headRef?: {
-      headHash?: string | null;
-      transfersWindowRoot?: string | null;
-      cumulativeTransfers?: number;
-    };
+    headRef?: { headHash?: string | null; transfersWindowRoot?: string | null; cumulativeTransfers?: number };
     policyId?: string | null | undefined;
     inputs?: unknown;
   };
@@ -375,11 +520,97 @@ function msUntilNextPulseBoundaryLocal(pulseNowInt: number): number {
     const nowMs = BigInt(Date.now());
     const delta = nextPulseMs - nowMs;
     if (delta <= 0n) return 0;
-    // delta is always ~0..6000ms here, safe to Number()
     return Number(delta);
   } catch {
     return Math.max(0, Math.floor(KAI_PULSE_MS));
   }
+}
+
+/* -----------------------
+   Tiny inline icons (no deps)
+   ----------------------- */
+
+type IconProps = { title?: string; className?: string };
+
+function IconSpark({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M12 2l1.6 6.2L20 10l-6.4 1.8L12 18l-1.6-6.2L4 10l6.4-1.8L12 2z" />
+    </svg>
+  );
+}
+
+function IconLock({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M17 9h-1V7a4 4 0 10-8 0v2H7a2 2 0 00-2 2v9a2 2 0 002 2h10a2 2 0 002-2v-9a2 2 0 00-2-2zm-7-2a2 2 0 114 0v2h-4V7z" />
+    </svg>
+  );
+}
+
+function IconWave({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M3 12c2.5 0 2.5-6 5-6s2.5 12 5 12 2.5-6 5-6 2.5 0 5 0v2c-2.5 0-2.5-6-5-6s-2.5 12-5 12-2.5-6-5-6-2.5 6-5 6V12z" />
+    </svg>
+  );
+}
+
+function IconChat({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M4 4h16a2 2 0 012 2v9a2 2 0 01-2 2H9l-5 4v-4H4a2 2 0 01-2-2V6a2 2 0 012-2z" />
+    </svg>
+  );
+}
+
+function IconList({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M7 6h14v2H7V6zm0 5h14v2H7v-2zm0 5h14v2H7v-2zM3 6h2v2H3V6zm0 5h2v2H3v-2zm0 5h2v2H3v-2z" />
+    </svg>
+  );
+}
+
+function IconShield({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M12 2l8 4v6c0 5-3.4 9.7-8 10-4.6-.3-8-5-8-10V6l8-4z" />
+    </svg>
+  );
+}
+
+function IconBack({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M14 7l-5 5 5 5V7z" />
+    </svg>
+  );
+}
+
+function IconSend({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2v7z" />
+    </svg>
+  );
+}
+
+function IconSkip({ title, className }: IconProps) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : "presentation"}>
+      {title ? <title>{title}</title> : null}
+      <path fill="currentColor" d="M5 5h2v14H5V5zm4 7l10-7v14L9 12z" />
+    </svg>
+  );
 }
 
 /* -----------------------
@@ -392,6 +623,9 @@ const ExhaleNote: React.FC<NoteProps> = ({
   policy = DEFAULT_ISSUANCE_POLICY,
   getNowPulse,
   onRender,
+  availablePhi,
+  originCanonical,
+  onSendNote,
   initial,
   className,
 }) => {
@@ -408,11 +642,7 @@ const ExhaleNote: React.FC<NoteProps> = ({
   const readNowPulseInt = useCallback((): number => {
     const local = momentFromUTC(BigInt(Date.now())).pulse;
     const ext = getNowPulse?.();
-    const extOk =
-      typeof ext === "number" &&
-      Number.isFinite(ext) &&
-      Math.abs(Math.trunc(ext) - Math.trunc(local)) <= 2;
-
+    const extOk = typeof ext === "number" && Number.isFinite(ext) && Math.abs(Math.trunc(ext) - Math.trunc(local)) <= 2;
     return Math.trunc(extOk ? (ext as number) : local);
   }, [getNowPulse]);
 
@@ -500,6 +730,12 @@ const ExhaleNote: React.FC<NoteProps> = ({
       zk: undefined,
       sigilSvg: "",
       verifyUrl: defaultVerifyUrl,
+      proofBundleJson: "",
+      bundleHash: "",
+      receiptHash: "",
+      verifiedAtPulse: undefined,
+      capsuleHash: "",
+      svgHash: "",
       ...(initial ?? {}),
     };
 
@@ -511,8 +747,27 @@ const ExhaleNote: React.FC<NoteProps> = ({
 
   /* Lock state */
   const [locked, setLocked] = useState<ExhaleNoteRenderPayload | null>(null);
+  const isLocked = locked !== null;
+
   const lockedRef = useRef(false);
   const [isRendering, setIsRendering] = useState(false);
+
+  /**
+   * Send Amount:
+   * - Unit toggle Φ ⇄ USD (only editable post-lock)
+   * - Store both raw inputs; one is active based on unit.
+   */
+  type SendUnit = "phi" | "usd";
+  const [sendUnit, setSendUnit] = useState<SendUnit>("phi");
+  const [sendPhiInput, setSendPhiInput] = useState<string>("");
+  const [sendUsdInput, setSendUsdInput] = useState<string>("");
+
+  const [sendNonce, setSendNonce] = useState<string>("");
+  const sendNonceRef = useRef<string>("");
+
+  const sendCommittedRef = useRef(false);
+  const [noteSendResult, setNoteSendResult] = useState<NoteSendResult | null>(null);
+  const lastSendPhiCanonRef = useRef<string>("");
 
   const u =
     (k: keyof BanknoteInputs) =>
@@ -527,10 +782,10 @@ const ExhaleNote: React.FC<NoteProps> = ({
     return unsigned;
   }, [meta, nowFloor]);
 
-  const liveAlgString = useMemo(
-    () => `${liveUnsigned.algorithm} • ${liveUnsigned.policyChecksum}`,
-    [liveUnsigned.algorithm, liveUnsigned.policyChecksum]
-  );
+  const liveAlgString = useMemo(() => `${liveUnsigned.algorithm} • ${liveUnsigned.policyChecksum}`, [
+    liveUnsigned.algorithm,
+    liveUnsigned.policyChecksum,
+  ]);
 
   useEffect(() => {
     setForm((prev) => (prev.valuationAlg ? prev : { ...prev, valuationAlg: liveAlgString }));
@@ -538,11 +793,7 @@ const ExhaleNote: React.FC<NoteProps> = ({
   }, [liveAlgString]);
 
   const liveQuote = useMemo(
-    () =>
-      quotePhiForUsd(
-        { meta, nowPulse: nowFloor, usd: usdSample, currentStreakDays: 0, lifetimeUsdSoFar: 0 },
-        policy
-      ),
+    () => quotePhiForUsd({ meta, nowPulse: nowFloor, usd: usdSample, currentStreakDays: 0, lifetimeUsdSoFar: 0 }, policy),
     [meta, nowFloor, usdSample, policy]
   );
 
@@ -552,17 +803,109 @@ const ExhaleNote: React.FC<NoteProps> = ({
   const phiPerUsd = liveQuote.phiPerUsd;
   const valueUsdIndicative = liveValuePhi * usdPerPhi;
 
+  const cappedDefaultPhi = useMemo(() => {
+    if (!isLocked || !locked) return liveValuePhi;
+    if (typeof availablePhi === "number" && Number.isFinite(availablePhi)) {
+      return Math.max(0, Math.min(locked.valuePhi, availablePhi));
+    }
+    return locked.valuePhi;
+  }, [isLocked, locked, liveValuePhi, availablePhi]);
+
+  const defaultSendPhi = isLocked ? cappedDefaultPhi : liveValuePhi;
+
+  const effectiveUsdPerPhi = isLocked && locked ? locked.usdPerPhi : usdPerPhi;
+  const effectivePhiPerUsd = isLocked && locked ? locked.phiPerUsd : phiPerUsd;
+
+  const defaultSendUsd = useMemo(() => {
+    const usd = defaultSendPhi * (Number.isFinite(effectiveUsdPerPhi) ? effectiveUsdPerPhi : 0);
+    return Number.isFinite(usd) && usd > 0 ? usd : 0;
+  }, [defaultSendPhi, effectiveUsdPerPhi]);
+
+  const parsedSendPhi = useMemo(() => (isLocked ? parsePhiInput(sendPhiInput) : null), [isLocked, sendPhiInput]);
+  const parsedSendUsd = useMemo(() => (isLocked ? parseUsdInput(sendUsdInput) : null), [isLocked, sendUsdInput]);
+
+  const effectiveSendPhi = useMemo(() => {
+    if (!isLocked) return defaultSendPhi;
+
+    const rate = Number.isFinite(effectiveUsdPerPhi) ? effectiveUsdPerPhi : 0;
+    if (sendUnit === "phi") {
+      return parsedSendPhi ?? defaultSendPhi;
+    }
+
+    // USD → Φ
+    if (!rate || rate <= 0) return defaultSendPhi;
+    const usd = parsedSendUsd;
+    if (usd == null) return defaultSendPhi;
+    const phi = usd / rate;
+    if (!Number.isFinite(phi) || phi <= 0) return defaultSendPhi;
+    return Number(phi.toFixed(6));
+  }, [isLocked, sendUnit, parsedSendPhi, parsedSendUsd, defaultSendPhi, effectiveUsdPerPhi]);
+
+  const effectiveValueUsd = useMemo(() => {
+    const usd = effectiveSendPhi * (Number.isFinite(effectiveUsdPerPhi) ? effectiveUsdPerPhi : 0);
+    return Number.isFinite(usd) && usd > 0 ? usd : 0;
+  }, [effectiveSendPhi, effectiveUsdPerPhi]);
+
+  const sendPhiOverBalance =
+    typeof availablePhi === "number" && Number.isFinite(availablePhi) && effectiveSendPhi > availablePhi + 1e-9;
+
+  /**
+   * If user has already "committed" a send (via print/save),
+   * any subsequent amount change must invalidate the prior send result and rotate nonce.
+   */
+  const effectiveSendPhiCanon = useMemo(() => {
+    return Number.isFinite(effectiveSendPhi) ? effectiveSendPhi.toFixed(6) : "";
+  }, [effectiveSendPhi]);
+
+  useEffect(() => {
+    if (!isLocked) {
+      lastSendPhiCanonRef.current = effectiveSendPhiCanon;
+      return;
+    }
+    if (lastSendPhiCanonRef.current === effectiveSendPhiCanon) return;
+    lastSendPhiCanonRef.current = effectiveSendPhiCanon;
+
+    if (!sendCommittedRef.current) return;
+    sendCommittedRef.current = false;
+    setNoteSendResult(null);
+
+    const nextNonce = generateNonce();
+    setSendNonce(nextNonce);
+    sendNonceRef.current = nextNonce;
+  }, [effectiveSendPhiCanon, isLocked]);
+
   /* Build SVG for preview */
   const buildCurrentSVG = useCallback((): string => {
-    const usingLocked = Boolean(locked);
+    const usingLocked = isLocked && locked !== null;
 
-    const valuePhiStr = usingLocked ? fTiny(locked!.valuePhi) : fTiny(liveValuePhi);
-    const premiumPhiStr = usingLocked ? form.premiumPhi || fTiny(livePremium) : fTiny(livePremium);
+    const valuePhiStr = usingLocked ? fTiny(effectiveSendPhi) : fTiny(liveValuePhi);
+    const valueUsdStr = usingLocked ? fUsd(effectiveValueUsd) : fUsd(valueUsdIndicative);
+    const premiumPhiStr = usingLocked ? fTiny(effectiveSendPhi) : fTiny(livePremium);
 
-    const lockedPulseStr = usingLocked ? String(locked!.lockedPulse) : "";
-    const valuationStampStr = usingLocked ? form.valuationStamp || locked!.seal.stamp : "";
+    const lockedPulseStr = usingLocked ? String(locked.lockedPulse) : "";
+    const valuationStampStr = usingLocked ? form.valuationStamp || locked.seal.stamp : "";
 
-    const verifyUrl = resolveVerifyUrl(form.verifyUrl, defaultVerifyUrl);
+    const verifyUrl = resolveNoteVerifyUrl(
+      {
+        verifyUrl: form.verifyUrl,
+        proofBundleJson: form.proofBundleJson,
+        kaiSignature: form.kaiSignature,
+        pulse: usingLocked ? locked.lockedPulse : Number(form.computedPulse || nowFloor),
+        verifiedAtPulse: form.verifiedAtPulse,
+      },
+      defaultVerifyUrl
+    );
+
+    const qrPayload = buildQrPayload(
+      {
+        verifyUrl: form.verifyUrl,
+        proofBundleJson: form.proofBundleJson,
+        kaiSignature: form.kaiSignature,
+        pulse: usingLocked ? locked.lockedPulse : Number(form.computedPulse || nowFloor),
+        verifiedAtPulse: form.verifiedAtPulse,
+      },
+      defaultVerifyUrl
+    );
 
     return buildBanknoteSVG({
       purpose: form.purpose,
@@ -574,6 +917,7 @@ const ExhaleNote: React.FC<NoteProps> = ({
       remark: form.remark,
 
       valuePhi: valuePhiStr,
+      valueUsd: valueUsdStr,
       premiumPhi: premiumPhiStr,
 
       computedPulse: lockedPulseStr,
@@ -586,9 +930,22 @@ const ExhaleNote: React.FC<NoteProps> = ({
 
       sigilSvg: form.sigilSvg || "",
       verifyUrl,
+      qrPayload,
       provenance: form.provenance ?? [],
     });
-  }, [form, liveValuePhi, livePremium, nowFloor, liveAlgString, locked, defaultVerifyUrl]);
+  }, [
+    form,
+    isLocked,
+    locked,
+    liveValuePhi,
+    livePremium,
+    valueUsdIndicative,
+    nowFloor,
+    liveAlgString,
+    defaultVerifyUrl,
+    effectiveSendPhi,
+    effectiveValueUsd,
+  ]);
 
   const renderPreviewThrottled = useRafThrottle(() => {
     const host = previewHostRef.current;
@@ -613,16 +970,11 @@ const ExhaleNote: React.FC<NoteProps> = ({
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
       const lockedPulse = nowFloor;
-      const { unsigned: lockedUnsigned } = computeIntrinsicUnsigned(meta, lockedPulse) as {
-        unsigned: IntrinsicUnsigned;
-      };
+      const { unsigned: lockedUnsigned } = computeIntrinsicUnsigned(meta, lockedPulse) as { unsigned: IntrinsicUnsigned };
 
       const valuationStamp = await computeValuationStamp(lockedUnsigned);
 
-      const quote = quotePhiForUsd(
-        { meta, nowPulse: lockedPulse, usd: usdSample, currentStreakDays: 0, lifetimeUsdSoFar: 0 },
-        policy
-      );
+      const quote = quotePhiForUsd({ meta, nowPulse: lockedPulse, usd: usdSample, currentStreakDays: 0, lifetimeUsdSoFar: 0 }, policy);
 
       const sealedBase: ValueSeal = materializeStampedSeal(lockedUnsigned as unknown as MaybeUnsignedSeal);
       const sealed: ValueSeal = { ...sealedBase, stamp: valuationStamp };
@@ -646,6 +998,36 @@ const ExhaleNote: React.FC<NoteProps> = ({
       lockedRef.current = true;
       setLocked(payload);
 
+      const cap = typeof availablePhi === "number" && Number.isFinite(availablePhi) ? availablePhi : sealed.valuePhi;
+      const initialPhi = Number(fTiny(Math.max(0, Math.min(sealed.valuePhi, cap))));
+      const initialPhiStr = fTiny(Math.max(0, Math.min(sealed.valuePhi, cap)));
+
+      setSendUnit("phi");
+      setSendPhiInput(initialPhiStr);
+      setSendUsdInput(formatUsdInput(initialPhi * quote.usdPerPhi));
+
+      {
+        const nextNonce = generateNonce();
+        setSendNonce(nextNonce);
+        sendNonceRef.current = nextNonce;
+      }
+
+      sendCommittedRef.current = false;
+      setNoteSendResult(null);
+
+      const proofFields = parseProofBundleJson(form.proofBundleJson);
+      const sigmaCanon = (form.sigmaCanon || form.kaiSignature || "").trim();
+      const shaHex = sigmaCanon ? sha256HexJs(sigmaCanon) : "";
+
+      let phiDerived = form.phiDerived?.trim() || "";
+      if (!phiDerived && sigmaCanon) {
+        try {
+          phiDerived = await derivePhiKeyFromSig(sigmaCanon);
+        } catch {
+          phiDerived = "";
+        }
+      }
+
       setForm((prev) => ({
         ...prev,
         computedPulse: String(lockedPulse),
@@ -654,6 +1036,11 @@ const ExhaleNote: React.FC<NoteProps> = ({
         premiumPhi: lockedUnsigned.premium !== undefined ? fTiny(lockedUnsigned.premium) : prev.premiumPhi,
         valuationAlg: prev.valuationAlg || `${lockedUnsigned.algorithm} • ${lockedUnsigned.policyChecksum}`,
         valuePhi: fTiny(sealed.valuePhi),
+        sigmaCanon: sigmaCanon || prev.sigmaCanon,
+        shaHex: shaHex || prev.shaHex,
+        phiDerived: phiDerived || prev.phiDerived,
+        verifiedAtPulse: prev.verifiedAtPulse ?? proofFields.verifiedAtPulse ?? lockedPulse,
+        receiptHash: prev.receiptHash || proofFields.receiptHash || "",
         verifyUrl: resolveVerifyUrl(prev.verifyUrl, defaultVerifyUrl),
       }));
 
@@ -665,7 +1052,7 @@ const ExhaleNote: React.FC<NoteProps> = ({
     } finally {
       setIsRendering(false);
     }
-  }, [nowFloor, meta, usdSample, policy, onRender, isRendering, defaultVerifyUrl]);
+  }, [nowFloor, meta, usdSample, policy, onRender, isRendering, defaultVerifyUrl, availablePhi, form]);
 
   /* Bridge hydration + updates */
   const lastBridgeJsonRef = useRef<string>("");
@@ -700,9 +1087,7 @@ const ExhaleNote: React.FC<NoteProps> = ({
         if (!detail) return;
 
         const normalizeIncoming = (obj: Partial<BanknoteInputs>) => {
-          if (typeof obj.verifyUrl === "string") {
-            obj.verifyUrl = resolveVerifyUrl(obj.verifyUrl, defaultVerifyUrl);
-          }
+          if (typeof obj.verifyUrl === "string") obj.verifyUrl = resolveVerifyUrl(obj.verifyUrl, defaultVerifyUrl);
           return obj;
         };
 
@@ -717,12 +1102,16 @@ const ExhaleNote: React.FC<NoteProps> = ({
             "provenance",
             "sigilSvg",
             "verifyUrl",
+            "proofBundleJson",
+            "bundleHash",
+            "receiptHash",
+            "verifiedAtPulse",
+            "capsuleHash",
+            "svgHash",
           ];
 
           const safe = normalizeIncoming(
-            Object.fromEntries(Object.entries(detail).filter(([k]) => allow.includes(k as keyof BanknoteInputs))) as Partial<
-              BanknoteInputs
-            >
+            Object.fromEntries(Object.entries(detail).filter(([k]) => allow.includes(k as keyof BanknoteInputs))) as Partial<BanknoteInputs>
           );
 
           const json = JSON.stringify(safe);
@@ -753,21 +1142,106 @@ const ExhaleNote: React.FC<NoteProps> = ({
     };
   }, [defaultVerifyUrl]);
 
-  /* Print + PNG (require lock) */
+  const resolveSendNonce = useCallback((): string => {
+    if (sendNonceRef.current) return sendNonceRef.current;
+    const next = sendNonce || generateNonce();
+    sendNonceRef.current = next;
+    if (sendNonce !== next) setSendNonce(next);
+    return next;
+  }, [sendNonce]);
+
+  const buildNoteSendPayload = useCallback((): NoteSendPayload | null => {
+    if (!locked) return null;
+    const amountPhi = effectiveSendPhi;
+    if (!Number.isFinite(amountPhi) || amountPhi <= 0) return null;
+
+    const verifyUrl = resolveNoteVerifyUrl(
+      {
+        verifyUrl: form.verifyUrl,
+        proofBundleJson: form.proofBundleJson,
+        kaiSignature: form.kaiSignature,
+        pulse: locked.lockedPulse,
+        verifiedAtPulse: form.verifiedAtPulse,
+      },
+      defaultVerifyUrl
+    );
+
+    const transferNonce = resolveSendNonce();
+    const merged: Partial<NoteSendPayload> = noteSendResult ?? {};
+    return {
+      ...merged,
+      amountPhi,
+      amountPhiScaled: toScaledPhi18(amountPhi),
+      amountUsd: amountPhi * effectiveUsdPerPhi,
+      lockedPulse: locked.lockedPulse,
+      valuationStamp: form.valuationStamp || locked.seal.stamp || "",
+      transferNonce,
+      verifyUrl,
+      parentCanonical: originCanonical ?? merged.parentCanonical,
+    };
+  }, [
+    locked,
+    effectiveSendPhi,
+    effectiveUsdPerPhi,
+    form.verifyUrl,
+    form.proofBundleJson,
+    form.kaiSignature,
+    form.verifiedAtPulse,
+    form.valuationStamp,
+    defaultVerifyUrl,
+    originCanonical,
+    resolveSendNonce,
+    noteSendResult,
+  ]);
+
+  const ensureNoteSend = useCallback(async (): Promise<boolean> => {
+    if (!locked) return false;
+    if (sendCommittedRef.current) return true;
+    if (sendPhiOverBalance) {
+      window.alert("Send amount exceeds the available Φ balance.");
+      return false;
+    }
+    const payload = buildNoteSendPayload();
+    if (!payload) {
+      window.alert("Enter a valid amount to send.");
+      return false;
+    }
+    try {
+      const result = await onSendNote?.(payload);
+      if (result) setNoteSendResult(result);
+      sendCommittedRef.current = true;
+      return true;
+    } catch (err) {
+      window.alert(`Send failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }, [locked, sendPhiOverBalance, buildNoteSendPayload, onSendNote]);
+
+  /* Print + exports (require lock) */
   const onPrint = useCallback(async () => {
     const root = printRootRef.current;
     if (!root) return;
     if (!lockedRef.current || !locked) {
-      window.alert("Please Render to lock the valuation before printing.");
+      window.alert("Render to lock the note valuation before printing.");
       return;
     }
+    if (!(await ensureNoteSend())) return;
 
-    const verifyUrl = resolveVerifyUrl(form.verifyUrl, defaultVerifyUrl);
+    const verifyUrl = resolveNoteVerifyUrl(
+      { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+      defaultVerifyUrl
+    );
+
+    const qrPayload = buildQrPayload(
+      { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+      defaultVerifyUrl
+    );
 
     const banknote = buildBanknoteSVG({
       ...form,
-      valuePhi: form.valuePhi || fTiny(locked.valuePhi),
-      premiumPhi: form.premiumPhi || fTiny(livePremium),
+      valuePhi: fTiny(effectiveSendPhi),
+      valueUsd: fUsd(effectiveValueUsd),
+      premiumPhi: fTiny(effectiveSendPhi),
       computedPulse: String(locked.lockedPulse),
       nowPulse: String(locked.lockedPulse),
       kaiSignature: form.kaiSignature || "",
@@ -776,8 +1250,12 @@ const ExhaleNote: React.FC<NoteProps> = ({
       valuationStamp: form.valuationStamp || locked.seal.stamp,
       sigilSvg: form.sigilSvg || "",
       verifyUrl,
+      qrPayload,
       provenance: form.provenance ?? [],
     });
+
+    const noteSendPayload = buildNoteSendPayload();
+    const noteSendJson = noteSendPayload ? JSON.stringify(noteSendPayload) : "";
 
     const proofPages = buildProofPagesHTML({
       frozenPulse: String(locked.lockedPulse),
@@ -786,14 +1264,22 @@ const ExhaleNote: React.FC<NoteProps> = ({
       sigmaCanon: form.sigmaCanon || "",
       shaHex: form.shaHex || "",
       phiDerived: form.phiDerived || "",
-      valuePhi: form.valuePhi || fTiny(locked.valuePhi),
-      premiumPhi: form.premiumPhi || fTiny(livePremium),
+      valuePhi: fTiny(effectiveSendPhi),
+      valueUsd: fUsd(effectiveValueUsd),
+      premiumPhi: fTiny(effectiveSendPhi),
       valuationAlg: form.valuationAlg || liveAlgString,
       valuationStamp: form.valuationStamp || locked.seal.stamp,
       zk: form.zk,
       provenance: form.provenance ?? [],
       sigilSvg: form.sigilSvg || "",
       verifyUrl,
+      noteSendJson,
+      proofBundleJson: form.proofBundleJson,
+      bundleHash: form.bundleHash,
+      receiptHash: form.receiptHash,
+      verifiedAtPulse: form.verifiedAtPulse,
+      capsuleHash: form.capsuleHash,
+      svgHash: form.svgHash,
     });
 
     renderIntoPrintRoot(root, banknote, String(locked.lockedPulse), proofPages);
@@ -804,21 +1290,31 @@ const ExhaleNote: React.FC<NoteProps> = ({
     await printWithTempTitle(title);
 
     root.setAttribute("aria-hidden", "true");
-  }, [form, locked, livePremium, liveAlgString, defaultVerifyUrl]);
+  }, [form, locked, liveAlgString, defaultVerifyUrl, effectiveSendPhi, effectiveValueUsd, ensureNoteSend, buildNoteSendPayload]);
 
-  const onSavePng = useCallback(async () => {
+  const onSaveSvg = useCallback(async () => {
     try {
       if (!lockedRef.current || !locked) {
-        window.alert("Please Render to lock the valuation before saving PNG.");
+        window.alert("Render to lock the note valuation before saving SVG.");
         return;
       }
+      if (!(await ensureNoteSend())) return;
 
-      const verifyUrl = resolveVerifyUrl(form.verifyUrl, defaultVerifyUrl);
+      const verifyUrl = resolveNoteVerifyUrl(
+        { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+        defaultVerifyUrl
+      );
+
+      const qrPayload = buildQrPayload(
+        { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+        defaultVerifyUrl
+      );
 
       const banknote = buildBanknoteSVG({
         ...form,
-        valuePhi: form.valuePhi || fTiny(locked.valuePhi),
-        premiumPhi: form.premiumPhi || fTiny(livePremium),
+        valuePhi: fTiny(effectiveSendPhi),
+        valueUsd: fUsd(effectiveValueUsd),
+        premiumPhi: fTiny(effectiveSendPhi),
         computedPulse: String(locked.lockedPulse),
         nowPulse: String(locked.lockedPulse),
         kaiSignature: form.kaiSignature || "",
@@ -827,267 +1323,766 @@ const ExhaleNote: React.FC<NoteProps> = ({
         valuationStamp: form.valuationStamp || locked.seal.stamp,
         sigilSvg: form.sigilSvg || "",
         verifyUrl,
+        qrPayload,
+        provenance: form.provenance ?? [],
+      });
+
+      const title = makeFileTitle(form.kaiSignature || "", String(locked.lockedPulse), form.valuationStamp || locked.seal.stamp || "");
+      triggerDownload(`${title}.svg`, new Blob([banknote], { type: "image/svg+xml" }), "image/svg+xml");
+    } catch (err) {
+      window.alert("Save SVG failed: " + (err instanceof Error ? err.message : String(err)));
+      // eslint-disable-next-line no-console
+      console.error(err);
+    }
+  }, [form, locked, liveAlgString, defaultVerifyUrl, effectiveSendPhi, effectiveValueUsd, ensureNoteSend]);
+
+  const onSavePng = useCallback(async () => {
+    try {
+      if (!lockedRef.current || !locked) {
+        window.alert("Render to lock the note valuation before saving PNG.");
+        return;
+      }
+      if (!(await ensureNoteSend())) return;
+
+      const verifyUrl = resolveNoteVerifyUrl(
+        { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+        defaultVerifyUrl
+      );
+
+      const qrPayload = buildQrPayload(
+        { verifyUrl: form.verifyUrl, proofBundleJson: form.proofBundleJson, kaiSignature: form.kaiSignature, pulse: locked.lockedPulse, verifiedAtPulse: form.verifiedAtPulse },
+        defaultVerifyUrl
+      );
+
+      const banknote = buildBanknoteSVG({
+        ...form,
+        valuePhi: fTiny(effectiveSendPhi),
+        valueUsd: fUsd(effectiveValueUsd),
+        premiumPhi: fTiny(effectiveSendPhi),
+        computedPulse: String(locked.lockedPulse),
+        nowPulse: String(locked.lockedPulse),
+        kaiSignature: form.kaiSignature || "",
+        userPhiKey: form.userPhiKey || "",
+        valuationAlg: form.valuationAlg || liveAlgString,
+        valuationStamp: form.valuationStamp || locked.seal.stamp,
+        sigilSvg: form.sigilSvg || "",
+        verifyUrl,
+        qrPayload,
         provenance: form.provenance ?? [],
       });
 
       const png = await svgStringToPngBlob(banknote, 2400);
 
-      const title = makeFileTitle(
-        form.kaiSignature || "",
-        String(locked.lockedPulse),
-        form.valuationStamp || locked.seal.stamp || ""
-      );
+      const proofBundleJson = form.proofBundleJson?.trim() || "";
+      const proofFields = parseProofBundleJson(proofBundleJson);
+      const bundleHash = form.bundleHash || proofFields.bundleHash;
+      const receiptHash = form.receiptHash || proofFields.receiptHash;
 
-      triggerDownload(`${title}.png`, png, "image/png");
+      const title = makeFileTitle(form.kaiSignature || "", String(locked.lockedPulse), form.valuationStamp || locked.seal.stamp || "");
+      const noteSendPayload = buildNoteSendPayload();
+      const noteSendJson = noteSendPayload ? JSON.stringify(noteSendPayload) : "";
+
+      const entries = [
+        proofBundleJson ? { keyword: "phi_proof_bundle", text: proofBundleJson } : null,
+        bundleHash ? { keyword: "phi_bundle_hash", text: bundleHash } : null,
+        receiptHash ? { keyword: "phi_receipt_hash", text: receiptHash } : null,
+        noteSendJson ? { keyword: "phi_note_send", text: noteSendJson } : null,
+        { keyword: "phi_note_svg", text: banknote },
+      ].filter((entry): entry is { keyword: string; text: string } => Boolean(entry));
+
+      if (entries.length === 0) {
+        triggerDownload(`${title}.png`, png, "image/png");
+        return;
+      }
+
+      const bytes = new Uint8Array(await png.arrayBuffer());
+      const enriched = insertPngTextChunks(bytes, entries);
+      const finalBlob = new Blob([enriched as BlobPart], { type: "image/png" });
+      triggerDownload(`${title}.png`, finalBlob, "image/png");
     } catch (err) {
       window.alert("Save PNG failed: " + (err instanceof Error ? err.message : String(err)));
       // eslint-disable-next-line no-console
       console.error(err);
     }
-  }, [form, locked, livePremium, liveAlgString, defaultVerifyUrl]);
+  }, [form, locked, liveAlgString, defaultVerifyUrl, effectiveSendPhi, effectiveValueUsd, ensureNoteSend, buildNoteSendPayload]);
 
   /* Derived display values */
-  const displayPulse = locked ? locked.lockedPulse : nowFloor;
-  const displayPhi = locked ? locked.valuePhi : liveValuePhi;
-  const displayUsd = locked ? locked.valueUsdIndicative : valueUsdIndicative;
-  const displayUsdPerPhi = locked ? locked.usdPerPhi : usdPerPhi;
-  const displayPhiPerUsd = locked ? locked.phiPerUsd : phiPerUsd;
-  const displayPremium = locked ? (form.premiumPhi ? Number(form.premiumPhi) : 0) : livePremium;
-  const phiParts = formatPhiParts(displayPhi);
+  const displayPulse = isLocked && locked ? locked.lockedPulse : nowFloor;
+  const displayPhi = isLocked ? effectiveSendPhi : liveValuePhi;
+  const displayUsd = isLocked ? effectiveValueUsd : valueUsdIndicative;
+  const displayUsdPerPhi = effectiveUsdPerPhi;
+  const displayPhiPerUsd = effectivePhiPerUsd;
+  const displayPremium = isLocked ? effectiveSendPhi : livePremium;
 
+  const phiParts = useMemo(() => formatPhiParts(displayPhi), [displayPhi]);
   const noteTitle = useMemo(() => `☤KAI ${fPulse(displayPulse)}`, [displayPulse]);
+
+  /* ────────────────────────────────────────────────────────────────────────────
+     Guided Step Composer
+     ──────────────────────────────────────────────────────────────────────────── */
+
+  type UiMode = "guide" | "form";
+  type GuideFieldKey = "to" | "from" | "purpose" | "location" | "witnesses" | "reference" | "remark";
+  type GuideStep = {
+    key: GuideFieldKey;
+    label: string;
+    prompt: string;
+    placeholder: string;
+    optional?: boolean;
+    suggestions?: readonly string[];
+  };
+
+  const guideSteps = useMemo<readonly GuideStep[]>(
+    () => [
+      { key: "to", label: "To", prompt: "Who is this note going to?", placeholder: "Name / handle / organization" },
+      { key: "from", label: "From", prompt: "Who is issuing it?", placeholder: "Your name / handle / organization" },
+      {
+        key: "purpose",
+        label: "Purpose",
+        prompt: "What is this note for?",
+        placeholder: "Work, gift, exchange, settlement…",
+        suggestions: ["work", "gift", "exchange", "settlement", "service", "receipt"],
+      },
+      { key: "location", label: "Location", prompt: "Where was it issued? (optional)", placeholder: "City / place", optional: true },
+      { key: "witnesses", label: "Witnesses", prompt: "Any witnesses? (optional)", placeholder: "Names / handles", optional: true },
+      { key: "reference", label: "Reference", prompt: "Any reference? (optional)", placeholder: "Invoice, order id, message id…", optional: true },
+      { key: "remark", label: "Remark", prompt: "Final remark (optional)", placeholder: "Short line that prints on the note", optional: true },
+    ],
+    []
+  );
+
+  const [uiMode, setUiMode] = useState<UiMode>("guide");
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+
+  const [guideIdx, setGuideIdx] = useState<number>(0);
+  const [draft, setDraft] = useState<string>("");
+
+  const composerRef = useRef<HTMLInputElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const currentGuide = guideSteps[Math.max(0, Math.min(guideIdx, guideSteps.length - 1))];
+  const guideKey = currentGuide.key;
+
+  const breathStyle = useMemo(() => {
+    return ({ ["--kk-breath-ms"]: `${Math.max(500, Math.floor(KAI_PULSE_MS))}ms` } as unknown) as CSSProperties;
+  }, []);
+
+  const setGuideField = useCallback((key: GuideFieldKey, value: string) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const askedMaxIdx = useMemo(() => Math.max(0, Math.min(guideIdx, guideSteps.length - 1)), [guideIdx, guideSteps.length]);
+
+  const jumpTo = useCallback(
+    (idx: number) => {
+      if (isLocked) return;
+      const safe = Math.max(0, Math.min(idx, askedMaxIdx));
+      setGuideIdx(safe);
+    },
+    [isLocked, askedMaxIdx]
+  );
+
+  useEffect(() => {
+    if (uiMode !== "guide") return;
+    if (isLocked) return;
+    setDraft((form[guideKey] ?? "").toString());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uiMode, guideKey, isLocked]);
+
+  useEffect(() => {
+    if (uiMode !== "guide") return;
+    if (isLocked) return;
+    composerRef.current?.focus({ preventScroll: true });
+  }, [uiMode, guideIdx, isLocked]);
+
+  useEffect(() => {
+    if (uiMode !== "guide") return;
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [uiMode, guideIdx, isLocked]);
+
+  const answeredCount = useMemo(() => {
+    let n = 0;
+    for (const s of guideSteps) if ((form[s.key] ?? "").trim()) n += 1;
+    return n;
+  }, [form, guideSteps]);
+
+  type TranscriptItem =
+    | { id: string; side: "sys"; text: string; stepIdx?: number }
+    | { id: string; side: "you"; text: string; stepIdx?: number };
+
+  const transcript = useMemo<readonly TranscriptItem[]>(() => {
+    const items: TranscriptItem[] = [];
+
+    items.push({
+      id: "intro",
+      side: "sys",
+      text: "Step mode: past answers stay visible. Only the current question is open.",
+    });
+
+    // Only show questions up to the current step (no future).
+    for (let i = 0; i <= askedMaxIdx; i++) {
+      const step = guideSteps[i];
+      items.push({ id: `q:${step.key}`, side: "sys", text: step.prompt, stepIdx: i });
+
+      const val = (form[step.key] ?? "").trim();
+
+      // Only show answers for steps strictly before the current guideIdx.
+      if (i < guideIdx) {
+        if (val) items.push({ id: `a:${step.key}`, side: "you", text: val, stepIdx: i });
+        else if (step.optional) items.push({ id: `a:${step.key}:empty`, side: "you", text: "—", stepIdx: i });
+      }
+    }
+
+    if (!isLocked) {
+      items.push({ id: "hint", side: "sys", text: "Answer above. Render locks the note valuation at the current Kai pulse." });
+    } else if (locked) {
+      items.push({
+        id: "lockedhint",
+        side: "sys",
+        text: `Locked at ☤KAI ${fPulse(locked.lockedPulse)}. Send Amount is the only editable value now.`,
+      });
+    }
+
+    return items;
+  }, [guideSteps, form, guideIdx, askedMaxIdx, isLocked, locked]);
+
+  const commitGuide = useCallback(() => {
+    if (isLocked) return;
+
+    const text = draft.trim();
+    if (!text && !currentGuide.optional) return;
+
+    setGuideField(guideKey, text);
+    setDraft("");
+    setGuideIdx((prev) => Math.min(prev + 1, guideSteps.length - 1));
+  }, [isLocked, draft, currentGuide.optional, guideKey, guideSteps.length, setGuideField]);
+
+  const skipGuide = useCallback(() => {
+    if (isLocked) return;
+    if (!currentGuide.optional) return;
+
+    setGuideField(guideKey, "");
+    setDraft("");
+    setGuideIdx((prev) => Math.min(prev + 1, guideSteps.length - 1));
+  }, [isLocked, currentGuide.optional, guideKey, guideSteps.length, setGuideField]);
+
+  const backGuide = useCallback(() => {
+    if (isLocked) return;
+    setDraft("");
+    setGuideIdx((prev) => Math.max(0, prev - 1));
+  }, [isLocked]);
+
+  const quickFill = useCallback(
+    (val: string) => {
+      if (isLocked) return;
+      const v = val.trim();
+      if (!v && !currentGuide.optional) return;
+      setGuideField(guideKey, v);
+      setDraft("");
+      setGuideIdx((prev) => Math.min(prev + 1, guideSteps.length - 1));
+    },
+    [isLocked, currentGuide.optional, guideKey, guideSteps.length, setGuideField]
+  );
+
+  /**
+   * Send unit toggle:
+   * - Only enabled after lock
+   * - Switching keeps the underlying amount (Φ) consistent by translating current effective φ to the other unit.
+   */
+  const setSendUnitSafe = useCallback(
+    (next: SendUnit) => {
+      if (!isLocked) return;
+      if (next === sendUnit) return;
+
+      const phi = effectiveSendPhi;
+      const rate = Number.isFinite(effectiveUsdPerPhi) ? effectiveUsdPerPhi : 0;
+
+      if (next === "phi") {
+        setSendPhiInput(Number.isFinite(phi) && phi > 0 ? fTiny(phi) : fTiny(defaultSendPhi));
+      } else {
+        const usd = rate > 0 ? phi * rate : defaultSendUsd;
+        setSendUsdInput(formatUsdInput(usd));
+      }
+
+      setSendUnit(next);
+    },
+    [isLocked, sendUnit, effectiveSendPhi, effectiveUsdPerPhi, defaultSendPhi, defaultSendUsd]
+  );
 
   /* UI */
   return (
-    <div data-kk-scope={uid} className={`kk-note ${className ?? ""}`}>
-      {/* Header */}
-      <div className="kk-bar">
-        <div className="kk-brand">
-          <strong>☤KAI — Kairos Kurrensy · Sovereign Harmonik Kingdom</strong>
-        </div>
-        <div className="kk-legal-pill">Issued under Yahuah’s Law of Eternal Light (Φ • Kai-Turah)</div>
-      </div>
-
-      {/* Pricing hero */}
-      <section className={`kk-hero ${locked ? "is-locked" : "is-live"}`}>
-        <div className="kk-status">
-          <span className={`kk-chip ${locked ? "chip-locked" : "chip-live"}`}>{locked ? "LOCKED" : "LIVE"}</span>
-          <span className="kk-chip kk-chip-pulse">☤KAI {fPulse(displayPulse)}</span>
-          <span className="kk-chip">value: {fPhi(displayPhi)}</span>
-          <span className="kk-chip">$ / φ: {fTiny(displayUsdPerPhi)}</span>
-          <span className="kk-chip">φ / $: {fTiny(displayPhiPerUsd)}</span>
-          <span className="kk-chip">premium φ: {fTiny(displayPremium)}</span>
-        </div>
-
-        <div className="kk-value-row">
-          <div className="kk-value-block">
-            <div className="kk-value-label">VALUE</div>
-            <div className="kk-value">
-              <span className="kk-value-sigil">Φ</span>
-              <span className="kk-value-int">{phiParts.int}</span>
-              <span className="kk-value-frac">{phiParts.frac}</span>
-            </div>
-            <div className="kk-value-usd">≈ {fUsd(displayUsd)}</div>
+    <div data-kk-scope={uid} className={`kk-note kk-note--guide ${className ?? ""}`} style={breathStyle}>
+      {/* ─────────────────────────────────────────────────────────────
+          PREMIUM ONE-ROW HEADER (Atlantean glass icon pills)
+         ───────────────────────────────────────────────────────────── */}
+      <div className="kk-headbar" role="region" aria-label="note header">
+        <div className="kk-headbar__left">
+          <div className="kk-pill kk-pill--brand" title="Exhale Note">
+            <span className="kk-brandMark" aria-hidden="true">
+              Φ
+            </span>
           </div>
 
-          <div className="kk-cta">
-            {!locked ? (
+          <div className={`kk-pill kk-pill--state ${isLocked ? "is-locked" : "is-live"}`} title={isLocked ? "Locked" : "Live"}>
+            {isLocked ? <IconLock /> : <IconSpark />}
+          </div>
+
+          <div className="kk-pill kk-pill--pulse" title="Kai pulse">
+            <IconWave />
+            <span className="kk-mono">{fPulse(displayPulse)}</span>
+          </div>
+
+          <div className="kk-pill kk-pill--value" title="Value (Φ)">
+            <span className="kk-pillPhi" aria-hidden="true">
+              Φ
+            </span>
+            <span className="kk-mono">{fTiny(displayPhi)}</span>
+          </div>
+
+          <div className="kk-pill kk-pill--usd" title="Indicative USD">
+            <span className="kk-mono">{fUsd(displayUsd)}</span>
+          </div>
+
+          <div className="kk-pill kk-pill--progress" title="Step progress">
+            <span className="kk-mono">
+              {answeredCount}/{guideSteps.length}
+            </span>
+          </div>
+        </div>
+
+        <div className="kk-headbar__right">
+          <div className="kk-pill kk-pill--mode" role="group" aria-label="mode">
+            <button
+              type="button"
+              className={`kk-iconBtn ${uiMode === "guide" ? "is-on" : ""}`}
+              onClick={() => setUiMode("guide")}
+              aria-pressed={uiMode === "guide"}
+              title="Guided"
+            >
+              <IconChat />
+            </button>
+            <button
+              type="button"
+              className={`kk-iconBtn ${uiMode === "form" ? "is-on" : ""}`}
+              onClick={() => setUiMode("form")}
+              aria-pressed={uiMode === "form"}
+              title="Form"
+            >
+              <IconList />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className={`kk-pill kk-pill--shield ${showAdvanced ? "is-on" : ""}`}
+            onClick={() => setShowAdvanced((v) => !v)}
+            aria-expanded={showAdvanced}
+            title={showAdvanced ? "Hide proof panel" : "Show proof panel"}
+          >
+            <IconShield />
+          </button>
+        </div>
+      </div>
+
+      {/* ─────────────────────────────────────────────────────────────
+          HERO: value, lock, actions
+         ───────────────────────────────────────────────────────────── */}
+      <section className={`kk-hero2 ${isLocked ? "is-locked" : "is-live"}`} aria-label="valuation">
+        <div className="kk-hero2__row">
+          <div className="kk-hero2__value">
+            <div className="kk-hero2__status">
+              <span className={`kk-chip2 ${isLocked ? "chip-locked" : "chip-live"}`} title={isLocked ? "Locked" : "Live"}>
+                {isLocked ? <IconLock /> : <IconSpark />}
+              </span>
+              <span className="kk-chip2 kk-chip2--pulse" title="Kai pulse">
+                <IconWave />
+                <span className="kk-mono">{fPulse(displayPulse)}</span>
+              </span>
+              <span className="kk-chip2" title="USD per Φ">
+                <span className="kk-mono">{fTiny(displayUsdPerPhi)}</span>
+              </span>
+              <span className="kk-chip2" title="Φ per USD">
+                <span className="kk-mono">{fTiny(displayPhiPerUsd)}</span>
+              </span>
+            </div>
+
+            <div className="kk-hero2__big">
+              <div className="kk-big__label">VALUE</div>
+              <div className="kk-big__num" aria-label="value in phi">
+                <span className="kk-big__phi">Φ</span>
+                <span className="kk-big__int">{phiParts.int}</span>
+                <span className="kk-big__frac">{phiParts.frac}</span>
+              </div>
+              <div className="kk-big__usd">≈ {fUsd(displayUsd)}</div>
+            </div>
+          </div>
+
+          <div className="kk-hero2__actions">
+            {!isLocked ? (
               <button
                 className="kk-btn kk-btn-primary kk-btn-xl"
                 onClick={handleRenderLock}
-                title="Freeze current pulse and valuation"
                 disabled={isRendering}
+                title="Lock valuation at the current Kai pulse"
               >
-                {isRendering ? "Rendering…" : "Render — Lock Valuation"}
+                {isRendering ? "Rendering…" : "Render — Lock Note"}
               </button>
             ) : (
-              <div className="kk-locked-banner" role="status" aria-live="polite">
-                <div className="kk-locked-title">Valuation Locked</div>
-                <div className="kk-locked-sub">
-                  ☤KAI {fPulse(locked.lockedPulse)} • Hash: {form.valuationStamp || locked.seal.stamp || "—"}
+              <div className="kk-lockcard" role="status" aria-live="polite">
+                <div className="kk-lockcard__t">Locked</div>
+                <div className="kk-lockcard__s">
+                  ☤KAI <span className="kk-mono">{locked ? fPulse(locked.lockedPulse) : fPulse(displayPulse)}</span> · stamp{" "}
+                  <span className="kk-mono">{form.valuationStamp || locked?.seal.stamp || "—"}</span>
                 </div>
               </div>
             )}
 
-            <div className="kk-cta-actions">
-              <button className="kk-btn" onClick={onPrint} disabled={!locked} title="Print proof pages">
-                Print / Save PDF
+            <div className="kk-hero2__cta">
+              <button className="kk-btn" onClick={onPrint} disabled={!isLocked} title="Print / Save PDF">
+                Print / PDF
               </button>
-              <button className="kk-btn kk-btn-ghost" onClick={onSavePng} disabled={!locked} title="Export note PNG">
+              <button className="kk-btn kk-btn-ghost" onClick={onSaveSvg} disabled={!isLocked} title="Save SVG">
+                Save SVG
+              </button>
+              <button className="kk-btn kk-btn-ghost" onClick={onSavePng} disabled={!isLocked} title="Save PNG">
                 Save PNG
               </button>
             </div>
           </div>
         </div>
+
+        {/* TOP ANSWER BOX + SEND AMOUNT (side-by-side) */}
+        <div className={`kk-dualbar ${uiMode === "guide" ? "is-guide" : ""}`} aria-label="answer and amount">
+          {uiMode === "guide" ? (
+            <div className="kk-qaCard" aria-label="current step">
+              <div className="kk-qaHead">
+                <div className="kk-qaMeta" title="Step">
+                  <IconSpark />
+                  <span className="kk-mono">{isLocked ? "LOCKED" : `${guideIdx + 1}/${guideSteps.length}`}</span>
+                </div>
+                <div className="kk-qaTag" title="Field">
+                  {currentGuide.label}
+                </div>
+              </div>
+
+              <div className="kk-qaPrompt">{isLocked ? "Locked — only Send Amount can change." : currentGuide.prompt}</div>
+
+              <div className="kk-qaRow">
+                <input
+                  ref={composerRef}
+                  className="kk-qaInput"
+                  value={isLocked ? "" : draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={isLocked ? "Locked" : currentGuide.placeholder}
+                  disabled={isLocked}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      commitGuide();
+                    }
+                  }}
+                />
+
+                <div className="kk-qaBtns" aria-label="step controls">
+                  <button
+                    type="button"
+                    className="kk-btn kk-btn-ghost kk-iconOnly"
+                    onClick={backGuide}
+                    disabled={guideIdx <= 0 || isLocked}
+                    title="Back"
+                    aria-label="Back"
+                  >
+                    <IconBack />
+                  </button>
+
+                  {currentGuide.optional ? (
+                    <button
+                      type="button"
+                      className="kk-btn kk-btn-ghost kk-iconOnly"
+                      onClick={skipGuide}
+                      disabled={isLocked}
+                      title="Skip"
+                      aria-label="Skip"
+                    >
+                      <IconSkip />
+                    </button>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    className="kk-btn kk-btn-primary kk-iconOnly"
+                    onClick={commitGuide}
+                    disabled={isLocked}
+                    title="Send"
+                    aria-label="Send"
+                  >
+                    <IconSend />
+                  </button>
+                </div>
+              </div>
+
+              {currentGuide.suggestions && !isLocked ? (
+                <div className="kk-suggest" aria-label="suggestions">
+                  {currentGuide.suggestions.map((s) => (
+                    <button key={s} type="button" className="kk-suggest__chip" onClick={() => quickFill(s)} title="Quick fill">
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Send Amount */}
+          <div className="kk-sendbar" aria-label="send amount">
+            <div className="kk-sendbar__left">
+              <div className="kk-sendbar__label">Send Amount</div>
+              <div className="kk-sendbar__sub">Committed when printing/saving exports.</div>
+            </div>
+
+            <div className="kk-sendbar__right">
+              {/* Unit toggle */}
+              <div className="kk-sendbar__unit" role="group" aria-label="amount unit">
+                <button
+                  type="button"
+                  className={`kk-sendbar__unitBtn ${sendUnit === "phi" ? "is-on" : ""}`}
+                  onClick={() => setSendUnitSafe("phi")}
+                  disabled={!isLocked}
+                  aria-pressed={sendUnit === "phi"}
+                  title="Enter Φ"
+                >
+                  Φ
+                </button>
+                <button
+                  type="button"
+                  className={`kk-sendbar__unitBtn ${sendUnit === "usd" ? "is-on" : ""}`}
+                  onClick={() => setSendUnitSafe("usd")}
+                  disabled={!isLocked}
+                  aria-pressed={sendUnit === "usd"}
+                  title="Enter USD"
+                >
+                  $
+                </button>
+              </div>
+
+              <div className="kk-sendbar__inputWrap">
+                <span className="kk-sendbar__prefix">{sendUnit === "phi" ? "Φ" : "$"}</span>
+                <input
+                  value={sendUnit === "phi" ? sendPhiInput : sendUsdInput}
+                  onChange={(e) => {
+                    if (sendUnit === "phi") setSendPhiInput(e.target.value);
+                    else setSendUsdInput(e.target.value);
+                  }}
+                  placeholder={
+                    !isLocked
+                      ? "Render to set amount"
+                      : sendUnit === "phi"
+                        ? fTiny(defaultSendPhi)
+                        : formatUsdInput(defaultSendUsd)
+                  }
+                  disabled={!isLocked}
+                  className={`kk-sendbar__input ${sendPhiOverBalance ? "is-error" : ""}`}
+                  inputMode="decimal"
+                  aria-invalid={sendPhiOverBalance || undefined}
+                />
+              </div>
+
+              <div className="kk-sendbar__meta">
+                <div className="kk-sendbar__usd">
+                  {sendUnit === "phi" ? (
+                    <>≈ {fUsd(effectiveValueUsd)}</>
+                  ) : (
+                    <>
+                      ≈ Φ <span className="kk-mono">{fTiny(effectiveSendPhi)}</span>
+                    </>
+                  )}
+                </div>
+
+                {isLocked && typeof availablePhi === "number" && Number.isFinite(availablePhi) ? (
+                  <div className="kk-sendbar__hint">
+                    Available: <span className="kk-mono">{fTiny(availablePhi)}</span> {sendPhiOverBalance ? "· exceeds" : ""}
+                  </div>
+                ) : (
+                  <div className="kk-sendbar__hint">Render locks valuation.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      {/* Immutable title */}
-      <div className="kk-row">
-        <label>Title</label>
-        <input value={`${noteTitle} — ${NOTE_TITLE}`} disabled className="kk-out" />
-      </div>
+      {/* Guided vs Form */}
+      {uiMode === "guide" ? (
+        <section className="kk-chatpanel" aria-label="guided history">
+          <div className="kk-chatpanel__head">
+            <div className="kk-chatpanel__h">
+              <span className="kk-mono">Guide</span> <span className="kk-chatpanel__badge">{isLocked ? "locked" : "live"}</span>
+            </div>
+            <div className="kk-chatpanel__hint">Only past Q/A + current question appear. Future steps stay hidden until reached.</div>
+          </div>
 
-      {/* Printed metadata */}
-      <div className="kk-grid">
-        <div className="kk-stack">
+          <div className="kk-chatpanel__body">
+            {transcript.map((m) => {
+              const canJump = typeof m.stepIdx === "number" && !isLocked && m.stepIdx < guideIdx;
+              return (
+                <div key={m.id} className={`kk-bubbleRow ${m.side === "you" ? "is-you" : "is-sys"}`}>
+                  <div className={`kk-bubble ${m.side === "you" ? "kk-bubble--you" : "kk-bubble--sys"}`}>
+                    <div className="kk-bubble__text">{m.text}</div>
+                    {canJump && m.side === "sys" ? (
+                      <button
+                        type="button"
+                        className="kk-bubble__jump"
+                        onClick={() => jumpTo(m.stepIdx!)}
+                        title="Edit this answered step"
+                        aria-label="Edit"
+                      >
+                        Edit
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="kk-previewCard" aria-label="live note preview">
+              <div className="kk-previewCard__head">
+                <div className="kk-previewCard__t">Live Note Preview</div>
+                <div className="kk-previewCard__s">Updates as you answer · locks on Render</div>
+              </div>
+              <div ref={previewHostRef} id="note-preview" className="kk-note-preview kk-out" />
+            </div>
+
+            <div ref={chatEndRef} />
+          </div>
+        </section>
+      ) : (
+        <section className="kk-formpanel" aria-label="classic form">
           <div className="kk-row">
-            <label>Purpose</label>
-            <input
-              value={form.purpose}
-              onChange={(e) => u("purpose")(e.target.value)}
-              placeholder="e.g., consideration for work / gift / exchange"
-              disabled={!!locked}
-            />
+            <label>Title</label>
+            <input value={`${noteTitle} — ${NOTE_TITLE}`} disabled className="kk-out" />
           </div>
+
+          <div className="kk-grid">
+            <div className="kk-stack">
+              <div className="kk-row">
+                <label>Purpose</label>
+                <input value={form.purpose} onChange={(e) => u("purpose")(e.target.value)} placeholder="Work / gift / exchange" disabled={isLocked} />
+              </div>
+              <div className="kk-row">
+                <label>To</label>
+                <input value={form.to} onChange={(e) => u("to")(e.target.value)} placeholder="Recipient" disabled={isLocked} />
+              </div>
+              <div className="kk-row">
+                <label>From</label>
+                <input value={form.from} onChange={(e) => u("from")(e.target.value)} placeholder="Issuer" disabled={isLocked} />
+              </div>
+            </div>
+
+            <div className="kk-stack">
+              <div className="kk-row">
+                <label>Location</label>
+                <input value={form.location} onChange={(e) => u("location")(e.target.value)} placeholder="(optional)" disabled={isLocked} />
+              </div>
+              <div className="kk-row">
+                <label>Witnesses</label>
+                <input value={form.witnesses} onChange={(e) => u("witnesses")(e.target.value)} placeholder="(optional)" disabled={isLocked} />
+              </div>
+              <div className="kk-row">
+                <label>Reference</label>
+                <input value={form.reference} onChange={(e) => u("reference")(e.target.value)} placeholder="(optional)" disabled={isLocked} />
+              </div>
+            </div>
+          </div>
+
           <div className="kk-row">
-            <label>To</label>
-            <input value={form.to} onChange={(e) => u("to")(e.target.value)} placeholder="Recipient" disabled={!!locked} />
-          </div>
-          <div className="kk-row">
-            <label>From</label>
-            <input value={form.from} onChange={(e) => u("from")(e.target.value)} placeholder="Issuer" disabled={!!locked} />
-          </div>
-        </div>
-
-        <div className="kk-stack">
-          <div className="kk-row">
-            <label>Location</label>
-            <input
-              value={form.location}
-              onChange={(e) => u("location")(e.target.value)}
-              placeholder="(optional)"
-              disabled={!!locked}
-            />
-          </div>
-          <div className="kk-row">
-            <label>Witnesses</label>
-            <input
-              value={form.witnesses}
-              onChange={(e) => u("witnesses")(e.target.value)}
-              placeholder="(optional)"
-              disabled={!!locked}
-            />
-          </div>
-          <div className="kk-row">
-            <label>Reference</label>
-            <input
-              value={form.reference}
-              onChange={(e) => u("reference")(e.target.value)}
-              placeholder="(optional)"
-              disabled={!!locked}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="kk-row">
-        <label>Remark</label>
-        <input
-          value={form.remark}
-          onChange={(e) => u("remark")(e.target.value)}
-          placeholder="In Yahuah We Trust — Secured by Φ, not man-made law"
-          disabled={!!locked}
-        />
-      </div>
-
-      <details className="kk-stack" style={{ marginTop: 8 }} open>
-        <summary>
-          <strong>Identity &amp; Valuation</strong> <span className="kk-hint">— appears on the bill + proof pages</span>
-        </summary>
-
-        <div className="kk-grid" style={{ marginTop: 8 }}>
-          <div className="kk-stack">
-            <div className="kk-row">
-              <label>Value Φ</label>
-              <input value={fTiny(displayPhi)} readOnly />
-            </div>
-            <div className="kk-row">
-              <label>Premium Φ</label>
-              <input value={fTiny(displayPremium)} readOnly />
-            </div>
-            <div className="kk-row">
-              <label>Valuation Alg</label>
-              <input value={form.valuationAlg || liveAlgString} readOnly />
-            </div>
-            <div className="kk-row">
-              <label>Valuation Stamp</label>
-              <input value={locked ? form.valuationStamp || locked.seal.stamp || "—" : ""} readOnly />
-            </div>
+            <label>Remark</label>
+            <input value={form.remark} onChange={(e) => u("remark")(e.target.value)} placeholder="Short line printed on the note" disabled={isLocked} />
           </div>
 
-          <div className="kk-stack">
-            <div className="kk-row">
-              <label>Pulse (locked)</label>
-              <input value={locked ? String(locked.lockedPulse) : ""} readOnly placeholder="set on Render" />
+          <div className="kk-previewCard kk-previewCard--flat" aria-label="live note preview">
+            <div className="kk-previewCard__head">
+              <div className="kk-previewCard__t">Live Note Preview</div>
+              <div className="kk-previewCard__s">Updates as you edit · locks on Render</div>
             </div>
-            <div className="kk-row">
-              <label>Pulse (live)</label>
-              <input value={String(nowFloor)} readOnly placeholder="live" />
-            </div>
-            <div className="kk-row">
-              <label>kaiSignature</label>
-              <input value={form.kaiSignature} onChange={(e) => u("kaiSignature")(e.target.value)} disabled={!!locked} />
-            </div>
-            <div className="kk-row">
-              <label>userΦkey</label>
-              <input value={form.userPhiKey} onChange={(e) => u("userPhiKey")(e.target.value)} disabled={!!locked} />
-            </div>
-            <div className="kk-row">
-              <label>Σ (canonical)</label>
-              <input value={form.sigmaCanon} onChange={(e) => u("sigmaCanon")(e.target.value)} disabled={!!locked} />
-            </div>
-            <div className="kk-row">
-              <label>sha256(Σ)</label>
-              <input value={form.shaHex} onChange={(e) => u("shaHex")(e.target.value)} disabled={!!locked} />
-            </div>
-            <div className="kk-row">
-              <label>Φ (derived)</label>
-              <input value={form.phiDerived} onChange={(e) => u("phiDerived")(e.target.value)} disabled={!!locked} />
-            </div>
+            <div ref={previewHostRef} id="note-preview" className="kk-note-preview kk-out" />
           </div>
-        </div>
+        </section>
+      )}
 
-        <div className="kk-row">
-          <label>Verify URL</label>
-          <input
-            value={form.verifyUrl}
-            onChange={(e) => u("verifyUrl")(e.target.value)}
-            placeholder="Used for QR & clickable sigil"
-            disabled={!!locked}
-          />
-        </div>
+      {/* Advanced proof panel (toggle in header) */}
+      {showAdvanced ? (
+        <section className="kk-advanced" aria-label="proof panel">
+          <details className="kk-stack kk-advDetails" open style={{ marginTop: 10 }}>
+            <summary>
+              <strong>Identity &amp; Valuation</strong> <span className="kk-hint">— printed on the note + proof pages</span>
+            </summary>
 
-        <div className="kk-row">
-          <label>Sigil SVG (raw)</label>
-          <textarea
-            value={form.sigilSvg}
-            onChange={(e) => u("sigilSvg")(e.target.value)}
-            className="kk-out"
-            disabled={!!locked}
-          />
-        </div>
-      </details>
+            <div className="kk-grid" style={{ marginTop: 8 }}>
+              <div className="kk-stack">
+                <div className="kk-row">
+                  <label>Value Φ</label>
+                  <input value={fTiny(displayPhi)} readOnly />
+                </div>
+                <div className="kk-row">
+                  <label>Premium Φ</label>
+                  <input value={fTiny(displayPremium)} readOnly />
+                </div>
+                <div className="kk-row">
+                  <label>Valuation Alg</label>
+                  <input value={form.valuationAlg || liveAlgString} readOnly />
+                </div>
+                <div className="kk-row">
+                  <label>Valuation Stamp</label>
+                  <input value={isLocked && locked ? form.valuationStamp || locked.seal.stamp || "—" : ""} readOnly />
+                </div>
+              </div>
 
-      {/* Preview + actions */}
-      <div className="kk-row kk-actions">
-        <div />
-        <div className="kk-flex">
-          {!locked && (
-            <button className="kk-btn kk-btn-primary" onClick={handleRenderLock} disabled={isRendering}>
-              {isRendering ? "Rendering…" : "Render — Lock Valuation"}
-            </button>
-          )}
-          <button className="kk-btn" onClick={onPrint} disabled={!locked}>
-            Print / Save PDF
-          </button>
-          <button className="kk-btn kk-btn-ghost" onClick={onSavePng} disabled={!locked}>
-            Save PNG
-          </button>
-        </div>
-        <div />
-      </div>
+              <div className="kk-stack">
+                <div className="kk-row">
+                  <label>Pulse (locked)</label>
+                  <input value={isLocked && locked ? String(locked.lockedPulse) : ""} readOnly placeholder="set on Render" />
+                </div>
+                <div className="kk-row">
+                  <label>Pulse (live)</label>
+                  <input value={String(nowFloor)} readOnly />
+                </div>
+                <div className="kk-row">
+                  <label>kaiSignature</label>
+                  <input value={form.kaiSignature} onChange={(e) => u("kaiSignature")(e.target.value)} disabled={isLocked} />
+                </div>
+                <div className="kk-row">
+                  <label>userΦkey</label>
+                  <input value={form.userPhiKey} onChange={(e) => u("userPhiKey")(e.target.value)} disabled={isLocked} />
+                </div>
+                <div className="kk-row">
+                  <label>Σ (canonical)</label>
+                  <input value={form.sigmaCanon} onChange={(e) => u("sigmaCanon")(e.target.value)} disabled={isLocked} />
+                </div>
+                <div className="kk-row">
+                  <label>sha256(Σ)</label>
+                  <input value={form.shaHex} onChange={(e) => u("shaHex")(e.target.value)} disabled={isLocked} />
+                </div>
+                <div className="kk-row">
+                  <label>Φ (derived)</label>
+                  <input value={form.phiDerived} onChange={(e) => u("phiDerived")(e.target.value)} disabled={isLocked} />
+                </div>
+              </div>
+            </div>
 
-      <div ref={previewHostRef} id="note-preview" className="kk-note-preview kk-out" />
+            <div className="kk-row">
+              <label>Verify URL</label>
+              <input value={form.verifyUrl} onChange={(e) => u("verifyUrl")(e.target.value)} placeholder="Used for QR & clickable sigil" disabled={isLocked} />
+            </div>
+
+            <div className="kk-row">
+              <label>Sigil SVG (raw)</label>
+              <textarea value={form.sigilSvg} onChange={(e) => u("sigilSvg")(e.target.value)} className="kk-out" disabled={isLocked} />
+            </div>
+          </details>
+        </section>
+      ) : null}
+
+      {/* Print root (must remain) */}
       <div ref={printRootRef} id="print-root" aria-hidden="true" />
     </div>
   );

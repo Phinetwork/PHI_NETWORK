@@ -1,6 +1,22 @@
 // src/components/KaiVoh/KaiVohModal.tsx
 "use client";
 
+/**
+ * KaiVohModal — Atlantean Portal Shell
+ * v5.3 — SIMPLIFIED, IOS-SAFE LOCK
+ *
+ * GOALS
+ * - No pull-to-refresh / overscroll reload on iOS.
+ * - No keyboard-jitter “fake refresh” while typing.
+ * - No programmatic reload hacks (removed).
+ * - Keep focus trap + ESC close (desktop) + safe scroll containment.
+ *
+ * NOTES
+ * - We lock page scroll via body:position:fixed (strongest iOS pattern).
+ * - We prevent rubber-band at scroll bounds (the real iOS refresh trigger).
+ * - We maintain a VisualViewport-driven --kai-vh var (frozen while editing).
+ */
+
 import {
   lazy,
   Suspense,
@@ -82,18 +98,13 @@ function SealEmblem({ className }: { className?: string }) {
   );
 }
 
-/** Uses SigilAuth context so the import is real + useful (fixes unused-vars). */
+/** Uses SigilAuth context so the import is real + useful. */
 function SigilAuthPill({ className }: { className?: string }) {
   const { auth } = useSigilAuth();
   const meta = auth.meta;
   if (!meta) return null;
 
-  const titleParts: string[] = [
-    `Pulse: ${meta.pulse}`,
-    `Beat: ${meta.beat}`,
-    `Step: ${meta.stepIndex}`,
-    `Day: ${meta.chakraDay}`,
-  ];
+  const titleParts: string[] = [`Pulse: ${meta.pulse}`, `Beat: ${meta.beat}`, `Step: ${meta.stepIndex}`, `Day: ${meta.chakraDay}`];
   if (meta.sigilId) titleParts.push(`Sigil: ${meta.sigilId}`);
   if (meta.userPhiKey) titleParts.push(`PhiKey: ${meta.userPhiKey}`);
 
@@ -103,11 +114,7 @@ function SigilAuthPill({ className }: { className?: string }) {
       role="status"
       aria-live="polite"
       title={titleParts.join(" • ")}
-      style={{
-        maxWidth: "100%",
-        overflowX: "auto",
-        whiteSpace: "nowrap",
-      }}
+      style={{ maxWidth: "100%", overflowX: "auto", whiteSpace: "nowrap" }}
     >
       <span className="sigil-auth-pill__dot" aria-hidden="true" />
       <span className="sigil-auth-pill__text mono">
@@ -118,10 +125,8 @@ function SigilAuthPill({ className }: { className?: string }) {
   );
 }
 
-/**
- * Focus helpers (no libs, no nested components).
- * Keeps Tab inside the modal, preventing “focus escape” which can cause iOS/Safari weird scroll jumps.
- */
+/* ───────────────────────── Focus helpers ───────────────────────── */
+
 function getFocusable(container: HTMLElement | null): HTMLElement[] {
   if (!container) return [];
   const nodes = Array.from(
@@ -148,6 +153,17 @@ function isEditableElement(el: Element | null): boolean {
   return false;
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : null;
+  if (!el) return false;
+  if (isEditableElement(el)) return true;
+  if (el instanceof HTMLElement) {
+    const nearest = el.closest("input,textarea,select,[contenteditable='true'],[contenteditable=''],[contenteditable]");
+    return isEditableElement(nearest);
+  }
+  return false;
+}
+
 function shouldSuppressEnter(el: Element | null): boolean {
   if (!el) return false;
   if (el instanceof HTMLTextAreaElement) return false;
@@ -159,13 +175,14 @@ function shouldSuppressEnter(el: Element | null): boolean {
   return false;
 }
 
+/* ───────────────────────── Modal ───────────────────────── */
+
 export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
   const handleClose = useCallback((): void => {
     clearSessionStorage();
     onClose();
   }, [onClose]);
 
-  // Hooks MUST run unconditionally (rules-of-hooks)
   const rootRef = useRef<HTMLDivElement | null>(null);
   const firstFocusableRef = useRef<HTMLButtonElement | null>(null);
   const scrollRegionRef = useRef<HTMLDivElement | null>(null);
@@ -194,26 +211,17 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
     [realmsMounted]
   );
 
-  const viewportVars = useMemo(() => {
-    return {
-      breath: `${BREATH_SEC}s`,
-      phi: `${PHI}`,
-    };
-  }, []);
+  const viewportVars = useMemo(() => ({ breath: `${BREATH_SEC}s`, phi: `${PHI}` }), []);
 
-  /**
-   * HARDENED MODAL LOCK (prevents reload / pull-to-refresh / overscroll glitches)
-   * - Locks page scroll using body:position:fixed (stronger than overflow hidden on iOS PWAs).
-   * - Prevents any touchmove/wheel outside the modal scroll region.
-   * - Prevents overscroll bounce at bounds INSIDE the modal scroll region (iOS pull-to-refresh trigger).
-   * - Adds Escape-to-close + Tab focus trap (avoids focus escape → accidental page scroll).
-   * - Sets global CSS vars for breath/phi + an innerHeight var for stable layout.
-   */
+  /* ---------------------------------------------------------------------- */
+  /*                    iOS-safe lock + overscroll prevention                */
+  /* ---------------------------------------------------------------------- */
+
   useEffect(() => {
     if (!open) return;
+
     const allowEscapeClose = !window.matchMedia?.("(pointer: coarse)")?.matches;
 
-    // Save prior styles (restore exactly)
     const prev = {
       bodyOverflow: document.body.style.overflow,
       bodyPosition: document.body.style.position,
@@ -222,17 +230,19 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       bodyRight: document.body.style.right,
       bodyWidth: document.body.style.width,
       bodyHeight: document.body.style.height,
+
       htmlOverflow: document.documentElement.style.overflow,
       htmlHeight: document.documentElement.style.height,
+
       docOverscroll: document.documentElement.style.getPropertyValue("overscroll-behavior"),
       bodyOverscroll: document.body.style.getPropertyValue("overscroll-behavior"),
-      touchAction: document.documentElement.style.touchAction,
+
       breath: document.documentElement.style.getPropertyValue("--kai-breath"),
       phi: document.documentElement.style.getPropertyValue("--kai-phi"),
       kaiVh: document.documentElement.style.getPropertyValue("--kai-vh"),
     };
 
-    // Lock scroll (strong iOS-safe pattern)
+    // Strong scroll lock (iOS-safe)
     lockedScrollYRef.current = window.scrollY || window.pageYOffset || 0;
     document.body.style.position = "fixed";
     document.body.style.top = `-${lockedScrollYRef.current}px`;
@@ -245,44 +255,107 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
     document.documentElement.style.overflow = "hidden";
     document.documentElement.style.height = "100%";
 
-    // Global overscroll kill (desktop + Android); iOS still needs touchmove gate below.
+    // Overscroll kill (prevents Android/desktop bounce; iOS still needs touch gate below)
     document.documentElement.style.setProperty("overscroll-behavior", "none");
     document.body.style.setProperty("overscroll-behavior", "none");
 
-    // Avoid double-tap zoom / weird pan interactions outside our scroll region
-    document.documentElement.style.touchAction = "manipulation";
-
-    // CSS vars for timing/phi
+    // CSS vars for breath/phi
     document.documentElement.style.setProperty("--kai-breath", viewportVars.breath);
     document.documentElement.style.setProperty("--kai-phi", viewportVars.phi);
 
-    // Stable viewport var (helps iOS address-bar / orientation “jump”)
-    const syncVh = (): void => {
-      document.documentElement.style.setProperty("--kai-vh", `${window.innerHeight}px`);
-    };
-    syncVh();
-    window.addEventListener("resize", syncVh, { passive: true });
+    // VisualViewport-stable --kai-vh; freeze while editing to avoid “keyboard jitter”
+    const vv = window.visualViewport ?? null;
 
-    // Make the scroll region itself “contain” overscroll (best-effort; iOS still needs touch gate)
+    let rafId = 0;
+    let lastH = -1;
+    let freeze = false;
+    let freezePending = false;
+
+    const measureVh = (): number => {
+      const h = vv?.height ?? window.innerHeight;
+      return Math.max(1, Math.round(h));
+    };
+
+    const applyVh = (force = false): void => {
+      const h = measureVh();
+      if (!force && lastH >= 0 && Math.abs(h - lastH) < 2) return;
+      lastH = h;
+      document.documentElement.style.setProperty("--kai-vh", `${h}px`);
+    };
+
+    const scheduleVh = (force = false): void => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        applyVh(force);
+        if (freezePending) {
+          freezePending = false;
+          freeze = true;
+        }
+      });
+    };
+
+    const onViewportResize = (): void => {
+      if (freeze) return;
+      scheduleVh(false);
+    };
+
+    const onFocusIn = (e: FocusEvent): void => {
+      if (!isEditableTarget(e.target)) return;
+      freeze = false;
+      freezePending = true;
+      scheduleVh(true);
+    };
+
+    const onFocusOut = (e: FocusEvent): void => {
+      if (!isEditableTarget(e.target)) return;
+      freeze = false;
+      freezePending = false;
+      scheduleVh(true);
+    };
+
+    scheduleVh(true);
+
+    window.addEventListener("resize", onViewportResize, { passive: true });
+    vv?.addEventListener("resize", onViewportResize as EventListener, { passive: true } as AddEventListenerOptions);
+    vv?.addEventListener("scroll", onViewportResize as EventListener, { passive: true } as AddEventListenerOptions);
+
+    document.addEventListener("focusin", onFocusIn as EventListener, { capture: true, passive: true });
+    document.addEventListener("focusout", onFocusOut as EventListener, { capture: true, passive: true });
+
+    // Make scroll region “contain” overscroll (best effort)
     const scrollEl = scrollRegionRef.current;
     if (scrollEl) {
-
       scrollEl.style.overscrollBehavior = "contain";
-      // iOS momentum scrolling (smooth)
-      // @ts-expect-error: webkitOverflowScrolling not in standard types.
+      // @ts-expect-error webkitOverflowScrolling is non-standard
       scrollEl.style.webkitOverflowScrolling = "touch";
     }
 
-    // Focus first interactive (if present)
-    firstFocusableRef.current?.focus();
+    // Focus first interactive (desktop-friendly)
+    if (allowEscapeClose) firstFocusableRef.current?.focus();
 
-    // Touch gating (iOS pull-to-refresh prevention)
+    // Touch gating: prevents iOS pull-to-refresh
     const onTouchStart = (e: TouchEvent): void => {
+      if (isEditableTarget(e.target)) return;
+
       touchStartYRef.current = e.touches[0]?.clientY ?? 0;
+      const s = scrollRegionRef.current;
+      if (!s) return;
+
+      const target = e.target as Node | null;
+      const inside = target ? s.contains(target) : false;
+      if (!inside) return;
+
+      // Nudge away from bounds so iOS doesn't rubber-band
+      if (s.scrollTop <= 0) s.scrollTop = 1;
+      else if (s.scrollTop + s.clientHeight >= s.scrollHeight) {
+        s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 1);
+      }
     };
 
     const onTouchMove = (e: TouchEvent): void => {
       if (e.touches.length !== 1) return;
+      if (isEditableTarget(e.target)) return;
 
       const s = scrollRegionRef.current;
       if (!s) {
@@ -291,10 +364,9 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       }
 
       const target = e.target as Node | null;
-      const insideScrollRegion = target ? s.contains(target) : false;
+      const inside = target ? s.contains(target) : false;
 
-      // Never allow swipe gestures outside the modal scroll region.
-      if (!insideScrollRegion) {
+      if (!inside) {
         e.preventDefault();
         return;
       }
@@ -305,14 +377,14 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       const atTop = s.scrollTop <= 0;
       const atBottom = s.scrollTop + s.clientHeight >= s.scrollHeight - 1;
 
-      // Prevent the native rubber-band at the bounds (pull-to-refresh trigger in PWAs)
       if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
         e.preventDefault();
       }
     };
 
-    // Wheel gating (trackpads can “overscroll” background under fixed body in some browsers)
     const onWheel = (e: WheelEvent): void => {
+      if (isEditableTarget(e.target)) return;
+
       const s = scrollRegionRef.current;
       if (!s) {
         e.preventDefault();
@@ -320,9 +392,9 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       }
 
       const target = e.target as Node | null;
-      const insideScrollRegion = target ? s.contains(target) : false;
+      const inside = target ? s.contains(target) : false;
 
-      if (!insideScrollRegion) {
+      if (!inside) {
         e.preventDefault();
         return;
       }
@@ -336,7 +408,6 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       }
     };
 
-    // Escape + focus trap
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         if (!allowEscapeClose) return;
@@ -344,6 +415,12 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
         e.preventDefault();
         e.stopPropagation();
         handleClose();
+        return;
+      }
+
+      if (e.key === "F5" || ((e.key === "r" || e.key === "R") && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        e.stopPropagation();
         return;
       }
 
@@ -383,7 +460,14 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       }
     };
 
-    // Abortable listeners (clean, reliable)
+    const onSubmit = (e: Event): void => {
+      const target = e.target as Element | null;
+      if (target && rootRef.current?.contains(target)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
     const ac = new AbortController();
     const optTouchStart: AddEventListenerOptions = { passive: true, signal: ac.signal, capture: true };
     const optTouchMove: AddEventListenerOptions = { passive: false, signal: ac.signal, capture: true };
@@ -394,33 +478,20 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
     document.addEventListener("touchmove", onTouchMove, optTouchMove);
     document.addEventListener("wheel", onWheel, optWheel);
     document.addEventListener("keydown", onKeyDown, optKey);
-
-    // Optional: block iOS gesture events that can cause zoom/scroll jumps
-    const onGesture = (ev: Event): void => {
-      ev.preventDefault();
-    };
-    document.addEventListener("gesturestart", onGesture, { passive: false, signal: ac.signal } as AddEventListenerOptions);
-    document.addEventListener("gesturechange", onGesture, {
-      passive: false,
-      signal: ac.signal,
-    } as AddEventListenerOptions);
-    document.addEventListener("gestureend", onGesture, { passive: false, signal: ac.signal } as AddEventListenerOptions);
-
-    const onSubmit = (e: Event): void => {
-      const target = e.target as Element | null;
-      if (target && rootRef.current?.contains(target)) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
     document.addEventListener("submit", onSubmit, { capture: true, signal: ac.signal } as AddEventListenerOptions);
 
     return () => {
-      // Remove listeners
       ac.abort();
-      window.removeEventListener("resize", syncVh);
 
-      // Restore global styles/vars
+      window.removeEventListener("resize", onViewportResize);
+      vv?.removeEventListener("resize", onViewportResize as EventListener);
+      vv?.removeEventListener("scroll", onViewportResize as EventListener);
+      document.removeEventListener("focusin", onFocusIn as EventListener, true);
+      document.removeEventListener("focusout", onFocusOut as EventListener, true);
+
+      if (rafId) cancelAnimationFrame(rafId);
+
+      // Restore styles/vars
       document.body.style.overflow = prev.bodyOverflow;
       document.body.style.position = prev.bodyPosition;
       document.body.style.top = prev.bodyTop;
@@ -438,8 +509,6 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       if (prev.bodyOverscroll) document.body.style.setProperty("overscroll-behavior", prev.bodyOverscroll);
       else document.body.style.removeProperty("overscroll-behavior");
 
-      document.documentElement.style.touchAction = prev.touchAction;
-
       if (prev.breath) document.documentElement.style.setProperty("--kai-breath", prev.breath);
       else document.documentElement.style.removeProperty("--kai-breath");
 
@@ -449,13 +518,12 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       if (prev.kaiVh) document.documentElement.style.setProperty("--kai-vh", prev.kaiVh);
       else document.documentElement.style.removeProperty("--kai-vh");
 
-      // Restore scroll position after unlocking fixed body
+      // Restore scroll position
       const y = lockedScrollYRef.current || 0;
       window.scrollTo(0, y);
     };
   }, [open, handleClose, viewportVars.breath, viewportVars.phi]);
 
-  // Close button handlers
   const handleClosePointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>): void => {
       e.stopPropagation();
@@ -475,7 +543,6 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
     [handleClose]
   );
 
-  // After hooks are declared, it's safe to early-return
   if (!open) return null;
 
   const node = (
@@ -487,23 +554,19 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
       aria-labelledby="kaivoh-title"
       data-view={view}
     >
-      {/* Dim stars + parallax halos */}
       <div className="atlantean-stars" aria-hidden="true" />
       <div className="atlantean-halo atlantean-halo--1" aria-hidden="true" />
       <div className="atlantean-halo atlantean-halo--2" aria-hidden="true" />
 
       <div className="kai-voh-container kai-pulse-border glass-omni" role="document">
-        {/* Sacred border rings + phi grid */}
         <div className="breath-ring breath-ring--outer" aria-hidden="true" />
         <div className="breath-ring breath-ring--inner" aria-hidden="true" />
         <div className="phi-grid" aria-hidden="true" />
 
-        {/* Corner spirals */}
         <SpiralSVG className="phi-spiral phi-spiral--tl" />
         <SpiralSVG className="phi-spiral phi-spiral--br" />
 
         <SigilAuthProvider>
-          {/* Close (hidden while in Realms to avoid double-X on mobile) */}
           {view !== "realms" && (
             <button
               ref={firstFocusableRef}
@@ -517,14 +580,12 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
             </button>
           )}
 
-          {/* Top-center orb (hide in Realms to avoid double orb) */}
           {view !== "realms" && (
             <div className="voh-top-orb" aria-hidden="true">
               <SealEmblem />
             </div>
           )}
 
-          {/* Tab bar */}
           <div className="kai-voh-tabbar" role="tablist" aria-label="Kai portal views">
             <button
               type="button"
@@ -552,16 +613,13 @@ export default function KaiVohModal({ open, onClose }: KaiVohModalProps) {
               Realms
             </button>
 
-            {/* Breath progress (phi-timed) */}
             <div className="breath-meter" aria-hidden="true">
               <div className="breath-meter__dot" />
             </div>
 
-            {/* Optional auth indicator (uses hook, no truncation; scrolls if long) */}
             <SigilAuthPill className="sigil-auth-pill--tabbar" />
           </div>
 
-          {/* Body */}
           <div className="kai-voh-body" ref={scrollRegionRef}>
             <h2 id="kaivoh-title" className="sr-only">
               Kai Portal

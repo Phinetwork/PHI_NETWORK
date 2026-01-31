@@ -19,6 +19,7 @@ export interface BuildBanknoteSvgOpts {
 
   // identity / valuation (appears in note + proof pages)
   valuePhi?: string;
+  valueUsd?: string;
   premiumPhi?: string;
   computedPulse?: string; // frozen pulse
   nowPulse?: string;      // fallback pulse
@@ -30,6 +31,7 @@ export interface BuildBanknoteSvgOpts {
   // sigil + verify
   sigilSvg?: string;      // raw SVG for slot
   verifyUrl?: string;     // used for QR & clickable slot
+  qrPayload?: string;     // optional QR payload (e.g. verifier pointer)
 
   // provenance (optional)
   provenance?: ProvenanceRow[];
@@ -47,6 +49,7 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
     remark = "In Yahuah We Trust — Secured by Φ, not man-made law",
 
     valuePhi = "0",
+    valueUsd = "—",
     premiumPhi = "0",
     computedPulse = "",
     nowPulse = "",
@@ -57,6 +60,7 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
 
     sigilSvg = "",
     verifyUrl = "/",
+    qrPayload,
 
     provenance = [],
   } = opts;
@@ -75,6 +79,7 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
   const serialCore = (kaiSignature ? kaiSignature.slice(0, 12).toUpperCase() : "Φ".repeat(12))
     .replace(/[^0-9A-F]/g, "Φ");
   const serial = `K℞K-${serialCore}-${pulseRendered}`;
+  const ValueUsd = valueUsd?.trim() ? valueUsd : "—";
 
   // Guilloché rosette
   const rosette = (() => {
@@ -98,13 +103,35 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
   const sigilEmbed = embedSigilIntoSlotClickable(sigilInner, slot.x, slot.y, slot.w, slot.h, verifyUrl);
 
   // QR block (avoid 8-digit hex colors; use stroke-opacity instead)
-  const qrSvg = makeQrSvgTagSafe(verifyUrl, 110, 2);
+  // QR block — perfectly centered inside the 110×110 slot (and thus the framed box)
+  const QR_PX = 110;     // intended QR slot size
+  const QR_PAD = 8;      // frame padding used by the rect (x/y = -8)
+  const QR_BOX_W = QR_PX + QR_PAD * 2; // 126
+  const QR_BOX_H = 142;  // keep your existing tuned height (label fits)
+
+  const qrSvg = makeQrSvgTagSafe(qrPayload || verifyUrl, QR_PX, 2);
+
+  // makeQrSvgTagSafe() may output an SVG smaller than QR_PX due to integer cell sizing.
+  // We measure that and center it inside the QR_PX slot.
+  const qrSvgPx = (() => {
+    const mw = qrSvg.match(/\bwidth="(\d+(?:\.\d+)?)"/i);
+    const mh = qrSvg.match(/\bheight="(\d+(?:\.\d+)?)"/i);
+    const n = mw ? Number(mw[1]) : mh ? Number(mh[1]) : QR_PX;
+    return Number.isFinite(n) && n > 0 ? n : QR_PX;
+  })();
+
+  // integer offset to preserve crispEdges as much as possible
+  const qrOff = Math.max(0, Math.round((QR_PX - qrSvgPx) / 2));
+
   const qrBlock = `
     <g transform="translate(828,346)">
-      <rect x="-8" y="-8" width="126" height="142" rx="10" fill="#0a1013" stroke="#2ad6c7" stroke-opacity=".20"/>
-      <g>${qrSvg}</g>
-      <text x="55" y="132" text-anchor="middle" font-family="ui-sans-serif" font-size="10" fill="#81fff1" letter-spacing=".08em">SCAN • VERIFY</text>
+      <rect x="${-QR_PAD}" y="${-QR_PAD}" width="${QR_BOX_W}" height="${QR_BOX_H}" rx="10"
+            fill="#0a1013" stroke="#2ad6c7" stroke-opacity=".20"/>
+      <g transform="translate(${qrOff},${qrOff})">${qrSvg}</g>
+      <text x="${QR_PX / 2}" y="132" text-anchor="middle"
+            font-family="ui-sans-serif" font-size="10" fill="#81fff1" letter-spacing=".08em">SCAN • VERIFY</text>
     </g>`;
+
 
   // Optional provenance (last 3 lines)
   let provLines = "";
@@ -261,6 +288,7 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
       <text x="0" y="22" fill="#bff" font-size="22" font-family="ui-sans-serif">VALUE</text>
       <text x="0" y="52" fill="#cfe" font-size="20" font-family="ui-monospace,monospace">Φ${esc(valuePhi)}</text>
       <text x="0" y="82" fill="#bfe" font-size="12" font-family="ui-monospace,monospace">PREMIUM Φ${esc(premiumPhi)}</text>
+      <text x="0" y="102" fill="#bfe" font-size="12" font-family="ui-monospace,monospace">≈ ${esc(ValueUsd)} USD</text>
     </g>
   </g>
 
@@ -301,7 +329,7 @@ export function buildBanknoteSVG(opts: BuildBanknoteSvgOpts): string {
   <!-- Serials / identity -->
   <g font-family="ui-monospace,monospace" font-size="11" fill="#bff">
     <text x="64"  y="130">SERIAL: ${esc(serial)}</text>
-    <text x="64"  y="266">PULSE (VALUATION): ${esc(pulseRendered)}</text>
+    <text x="64"  y="306">PULSE (VALUATION): ${esc(pulseRendered)}</text>
     <text x="320" y="130" text-anchor="start">KaiSignature: ${esc(kaiSignature || "—")}</text>
     <text x="520" y="146" text-anchor="start">ΦKey: ${esc(userPhiKey || "—")}</text>
     <text x="64" y="460" fill="#aee" font-size="10" opacity=".95">Algorithm (Valuation): ${esc(valuationAlg || "—")}</text>

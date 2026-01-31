@@ -1,7 +1,7 @@
 // src/pages/VerifyPage.tsx
 "use client";
 
-import React, { useCallback, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import "./VerifyPage.css";
 
 import VerifierFrame from "../components/KaiVoh/VerifierFrame";
@@ -36,7 +36,7 @@ import {
   type ProofBundleLike,
 } from "../components/KaiVoh/verifierProof";
 import { extractProofBundleMetaFromSvg, type ProofBundleMeta } from "../utils/sigilMetadata";
-import { derivePhiKeyFromSig } from "../components/VerifierStamper/sigilUtils";
+import { derivePhiKeyFromSig, genNonce } from "../components/VerifierStamper/sigilUtils";
 import { tryVerifyGroth16 } from "../components/VerifierStamper/zk";
 import { isKASAuthorSig, type KASAuthorSig } from "../utils/authorSig";
 import {
@@ -55,8 +55,12 @@ import {
 import { assertionToJson, verifyOwnerWebAuthnAssertion } from "../utils/webauthnOwner";
 import { deriveOwnerPhiKeyFromReceive, type OwnerKeyDerivation } from "../utils/ownerPhiKey";
 import { base64UrlDecode, sha256Hex } from "../utils/sha256";
-import { readPngTextChunk } from "../utils/pngChunks";
+import { insertPngTextChunks, readPngTextChunk } from "../utils/pngChunks";
 import { getKaiPulseEternalInt } from "../SovereignSolar";
+import { getSendRecordByNonce, listen, markConfirmedByNonce } from "../utils/sendLedger";
+import { recordSigilTransferMovement } from "../utils/sigilTransferRegistry";
+import { isNoteClaimed, markNoteClaimed } from "../components/SigilExplorer/registryStore";
+import { pullAndImportRemoteUrls } from "../components/SigilExplorer/remotePull";
 import { useKaiTicker } from "../hooks/useKaiTicker";
 import { useValuation } from "./SigilPage/useValuation";
 import type { SigilMetadataLite } from "../utils/valuation";
@@ -64,6 +68,7 @@ import { downloadVerifiedCardPng } from "../og/downloadVerifiedCard";
 import type { VerifiedCardData } from "../og/types";
 import { jcsCanonicalize } from "../utils/jcs";
 import { svgCanonicalForHash } from "../utils/svgProof";
+import { svgStringToPngBlob, triggerDownload } from "../components/exhale-note/svgToPng";
 import useRollingChartSeries from "../components/VerifierStamper/hooks/useRollingChartSeries";
 import { BREATH_MS } from "../components/valuation/constants";
 import {
@@ -122,6 +127,44 @@ function parseJsonString(value: unknown): unknown {
   }
 }
 
+type NoteSendMeta = {
+  parentCanonical: string;
+  transferNonce: string;
+  amountPhi?: number;
+  amountUsd?: number;
+  childCanonical?: string;
+};
+
+function buildNoteSendMetaFromObject(value: unknown): NoteSendMeta | null {
+  if (!isRecord(value)) return null;
+  const parentCanonical = typeof value.parentCanonical === "string" ? value.parentCanonical.trim() : "";
+  const transferNonce = typeof value.transferNonce === "string" ? value.transferNonce.trim() : "";
+  const amountPhi = typeof value.amountPhi === "number" && Number.isFinite(value.amountPhi) ? value.amountPhi : undefined;
+  const amountUsd = typeof value.amountUsd === "number" && Number.isFinite(value.amountUsd) ? value.amountUsd : undefined;
+  const childCanonical = typeof value.childCanonical === "string" ? value.childCanonical.trim() : undefined;
+  if (!parentCanonical || !transferNonce) return null;
+  return { parentCanonical, transferNonce, amountPhi, amountUsd, childCanonical };
+}
+
+function parseNoteSendMeta(raw: string | null): NoteSendMeta | null {
+  if (!raw) return null;
+  try {
+    return buildNoteSendMetaFromObject(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function parseNoteSendPayload(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -163,7 +206,7 @@ type DebitLoose = {
   amount?: number;
 };
 
-type EmbeddedPhiSource = "balance" | "embedded" | "live";
+type EmbeddedPhiSource = "balance" | "embedded" | "live" | "note";
 
 type AttestationState = boolean | "missing";
 
@@ -450,6 +493,91 @@ function isPngFile(file: File): boolean {
   return name.endsWith(".png") || type === "image/png";
 }
 
+function isPdfFile(file: File): boolean {
+  const name = (file.name || "").toLowerCase();
+  const type = (file.type || "").toLowerCase();
+  return name.endsWith(".pdf") || type === "application/pdf";
+}
+
+function extractNearestJson(text: string, anchorIdx: number): unknown | null {
+  let start = -1;
+  let depth = 0;
+  for (let i = anchorIdx; i >= 0; i -= 1) {
+    const ch = text[i];
+    if (ch === "}") depth += 1;
+    if (ch === "{") {
+      if (depth === 0) {
+        start = i;
+        break;
+      }
+      depth -= 1;
+    }
+  }
+  if (start < 0) return null;
+
+  let end = -1;
+  depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end < 0) return null;
+  const raw = text.slice(start, end + 1);
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function parsePdfForSharedReceipt(buffer: ArrayBuffer): SharedReceipt | null {
+  const decoder = new TextDecoder("latin1");
+  const text = decoder.decode(new Uint8Array(buffer));
+  const anchors = [
+    "\"proofCapsule\"",
+    "\"bundleHash\"",
+    "\"receiptHash\"",
+    "\"verifierUrl\"",
+    "\"verifiedAtPulse\"",
+    "\"ownerPhiKey\"",
+  ];
+
+  for (const anchor of anchors) {
+    let idx = text.indexOf(anchor);
+    while (idx >= 0) {
+      const candidate = extractNearestJson(text, idx);
+      const receipt = buildSharedReceiptFromObject(candidate);
+      if (receipt) return receipt;
+      idx = text.indexOf(anchor, idx + anchor.length);
+    }
+  }
+  return null;
+}
+
+function parsePdfForNoteSendMeta(buffer: ArrayBuffer): NoteSendMeta | null {
+  const decoder = new TextDecoder("latin1");
+  const text = decoder.decode(new Uint8Array(buffer));
+  const anchors = ["\"transferNonce\"", "\"parentCanonical\"", "\"amountPhi\"", "\"amountUsd\"", "\"childCanonical\""];
+
+  for (const anchor of anchors) {
+    let idx = text.indexOf(anchor);
+    while (idx >= 0) {
+      const candidate = extractNearestJson(text, idx);
+      const meta = buildNoteSendMetaFromObject(candidate);
+      if (meta) return meta;
+      idx = text.indexOf(anchor, idx + anchor.length);
+    }
+  }
+  return null;
+}
+
 async function copyTextToClipboard(text: string): Promise<boolean> {
   const value = text.trim();
   if (!value) return false;
@@ -711,6 +839,8 @@ export default function VerifyPage(): ReactElement {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const pngFileRef = useRef<HTMLInputElement | null>(null);
   const lastAutoScanKeyRef = useRef<string | null>(null);
+  const noteSendConfirmedRef = useRef<string | null>(null);
+  const noteClaimRemoteCheckedRef = useRef<string | null>(null);
 
   const slugRaw = useMemo(() => readSlugFromLocation(), []);
   const slug = useMemo(() => parseSlug(slugRaw), [slugRaw]);
@@ -722,6 +852,10 @@ export default function VerifyPage(): ReactElement {
   const [result, setResult] = useState<VerifyResult>({ status: "idle" });
   const [busy, setBusy] = useState<boolean>(false);
   const [sharedReceipt, setSharedReceipt] = useState<SharedReceipt | null>(initialReceiptResult.receipt);
+  const [noteSendMeta, setNoteSendMeta] = useState<NoteSendMeta | null>(null);
+  const [noteSendPayloadRaw, setNoteSendPayloadRaw] = useState<Record<string, unknown> | null>(null);
+  const [noteSvgFromPng, setNoteSvgFromPng] = useState<string>("");
+  const [noteProofBundleJson, setNoteProofBundleJson] = useState<string>("");
 
   const [proofCapsule, setProofCapsule] = useState<ProofCapsuleV1 | null>(null);
   const [capsuleHash, setCapsuleHash] = useState<string>("");
@@ -758,6 +892,14 @@ export default function VerifyPage(): ReactElement {
   const [receiveSig, setReceiveSig] = useState<ReceiveSig | null>(null);
 
   const [dragActive, setDragActive] = useState<boolean>(false);
+  const [ledgerTick, setLedgerTick] = useState<number>(0);
+  const [registryTick, setRegistryTick] = useState<number>(0);
+
+  useEffect(() => {
+    return listen(() => {
+      setLedgerTick((prev) => prev + 1);
+    });
+  }, []);
 
   const { pulse: currentPulse } = useKaiTicker();
   const searchParams = useMemo(() => new URLSearchParams(typeof window !== "undefined" ? window.location.search : ""), []);
@@ -821,22 +963,61 @@ export default function VerifyPage(): ReactElement {
     return readEmbeddedPhiAmount(result.embedded.raw) ?? readEmbeddedPhiAmount(embeddedProof?.raw);
   }, [embeddedProof?.raw, result]);
 
-  const displayPhi = ledgerBalance?.remaining ?? embeddedPhi ?? liveValuePhi;
+  const noteValuePhi = noteSendMeta?.amountPhi ?? null;
+  const noteValueUsd = noteSendMeta?.amountUsd ?? null;
 
-  const displaySource: EmbeddedPhiSource = ledgerBalance ? "balance" : embeddedPhi != null ? "embedded" : "live";
+  const displayPhi = noteValuePhi ?? ledgerBalance?.remaining ?? embeddedPhi ?? liveValuePhi;
+
+  const displaySource: EmbeddedPhiSource = noteValuePhi != null ? "note" : ledgerBalance ? "balance" : embeddedPhi != null ? "embedded" : "live";
 
   const displayUsd = useMemo(() => {
+    if (noteValueUsd != null && Number.isFinite(noteValueUsd)) return noteValueUsd;
     if (displayPhi == null || !Number.isFinite(usdPerPhi) || usdPerPhi <= 0) return null;
     return displayPhi * usdPerPhi;
-  }, [displayPhi, usdPerPhi]);
+  }, [displayPhi, noteValueUsd, usdPerPhi]);
 
-  const displayLabel = displaySource === "balance" ? "BALANCE" : displaySource === "embedded" ? "GLYPH" : "LIVE";
+  const displayLabel =
+    displaySource === "note" ? "NOTE" : displaySource === "balance" ? "BALANCE" : displaySource === "embedded" ? "GLYPH" : "LIVE";
   const displayAriaLabel =
-    displaySource === "balance"
-      ? "Glyph balance"
-      : displaySource === "embedded"
-        ? "Glyph embedded value"
-        : "Live glyph valuation";
+    displaySource === "note"
+      ? "Exhale note value"
+      : displaySource === "balance"
+        ? "Glyph balance"
+        : displaySource === "embedded"
+          ? "Glyph embedded value"
+          : "Live glyph valuation";
+
+  const noteSendRecord = useMemo(
+    () => (noteSendMeta ? getSendRecordByNonce(noteSendMeta.parentCanonical, noteSendMeta.transferNonce) : null),
+    [noteSendMeta, ledgerTick, registryTick],
+  );
+  const noteClaimed =
+    Boolean(noteSendRecord?.confirmed) ||
+    (noteSendMeta ? isNoteClaimed(noteSendMeta.parentCanonical, noteSendMeta.transferNonce) : false);
+  const noteClaimStatus = noteSendMeta ? (noteClaimed ? "CLAIMED" : "UNCLAIMED") : null;
+  const isExhaleNoteUpload = Boolean(noteSendMeta || noteSvgFromPng || noteProofBundleJson);
+
+  useEffect(() => {
+    if (!noteSendMeta || noteClaimed) return;
+    const key = `${noteSendMeta.parentCanonical}|${noteSendMeta.transferNonce}`;
+    if (noteClaimRemoteCheckedRef.current === key) return;
+    noteClaimRemoteCheckedRef.current = key;
+    const ac = new AbortController();
+
+    (async () => {
+      try {
+        const res = await pullAndImportRemoteUrls(ac.signal);
+        if (ac.signal.aborted) return;
+        if (res.imported > 0) setRegistryTick((prev) => prev + 1);
+      } catch {
+        // ignore remote registry failures
+      }
+    })();
+
+    return () => {
+      ac.abort();
+    };
+  }, [noteClaimed, noteSendMeta]);
 
   const isReceiveGlyph = useMemo(() => {
     const mode = embeddedProof?.mode ?? sharedReceipt?.mode;
@@ -1116,6 +1297,10 @@ export default function VerifyPage(): ReactElement {
       setSvgText(text);
       setResult({ status: "idle" });
       setNotice("");
+      setNoteSendMeta(null);
+      setNoteSendPayloadRaw(null);
+      setNoteSvgFromPng("");
+      setNoteProofBundleJson("");
     },
     [slug],
   );
@@ -1126,13 +1311,20 @@ export default function VerifyPage(): ReactElement {
         setResult({ status: "error", message: "Select a receipt PNG with embedded proof metadata.", slug });
         return;
       }
+      setNoteSendMeta(null);
+      setNoteSendPayloadRaw(null);
+      setNoteSvgFromPng("");
+      setNoteProofBundleJson("");
       try {
         const buffer = await readFileArrayBuffer(file);
-        const text = readPngTextChunk(new Uint8Array(buffer), "phi_proof_bundle");
+        const bytes = new Uint8Array(buffer);
+        const text = readPngTextChunk(bytes, "phi_proof_bundle");
         if (!text) {
           setResult({ status: "error", message: "Receipt PNG is missing embedded proof metadata.", slug });
           return;
         }
+        const noteSendJson = readPngTextChunk(bytes, "phi_note_send");
+        const noteSvg = readPngTextChunk(bytes, "phi_note_svg");
         const parsed = JSON.parse(text) as unknown;
         const receipt = buildSharedReceiptFromObject(parsed);
         if (!receipt) {
@@ -1143,8 +1335,44 @@ export default function VerifyPage(): ReactElement {
         setSvgText("");
         setResult({ status: "idle" });
         setNotice("Receipt PNG loaded.");
+        setNoteSendMeta(parseNoteSendMeta(noteSendJson));
+        setNoteSendPayloadRaw(parseNoteSendPayload(noteSendJson));
+        setNoteSvgFromPng(noteSvg ?? "");
+        setNoteProofBundleJson(text);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed to read receipt PNG.";
+        setResult({ status: "error", message: msg, slug });
+      }
+    },
+    [slug],
+  );
+
+  const onPickReceiptPdf = useCallback(
+    async (file: File): Promise<void> => {
+      if (!isPdfFile(file)) {
+        setResult({ status: "error", message: "Select a receipt PDF with embedded proof metadata.", slug });
+        return;
+      }
+      setNoteSendMeta(null);
+      setNoteSendPayloadRaw(null);
+      setNoteSvgFromPng("");
+      setNoteProofBundleJson("");
+      try {
+        const buffer = await readFileArrayBuffer(file);
+        const receipt = parsePdfForSharedReceipt(buffer);
+        const noteMeta = parsePdfForNoteSendMeta(buffer);
+        if (!receipt) {
+          setSharedReceipt(null);
+          setResult({ status: "error", message: "Receipt PDF is missing embedded proof metadata.", slug });
+          return;
+        }
+        setSharedReceipt(receipt);
+        setSvgText("");
+        setResult({ status: "idle" });
+        setNotice("Receipt PDF loaded.");
+        setNoteSendMeta(noteMeta);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to read receipt PDF.";
         setResult({ status: "error", message: msg, slug });
       }
     },
@@ -1155,6 +1383,11 @@ export default function VerifyPage(): ReactElement {
     (files: FileList | null | undefined): void => {
       if (!files || files.length === 0) return;
       const arr = Array.from(files);
+      const pdf = arr.find(isPdfFile);
+      if (pdf) {
+        void onPickReceiptPdf(pdf);
+        return;
+      }
       const png = arr.find(isPngFile);
       if (png) {
         void onPickReceiptPng(png);
@@ -1167,8 +1400,32 @@ export default function VerifyPage(): ReactElement {
       }
       void onPickFile(svg);
     },
-    [onPickFile, onPickReceiptPng, slug],
+    [onPickFile, onPickReceiptPng, onPickReceiptPdf, slug],
   );
+
+  const confirmNoteSend = useCallback(() => {
+    if (!noteSendMeta) return;
+    const key = `${noteSendMeta.parentCanonical}|${noteSendMeta.transferNonce}`;
+    if (noteSendConfirmedRef.current === key) return;
+    noteSendConfirmedRef.current = key;
+    try {
+      markConfirmedByNonce(noteSendMeta.parentCanonical, noteSendMeta.transferNonce);
+      markNoteClaimed(noteSendMeta.parentCanonical, noteSendMeta.transferNonce, {
+        childCanonical: noteSendMeta.childCanonical,
+      });
+      if (noteSendMeta.childCanonical && noteSendMeta.amountPhi) {
+        recordSigilTransferMovement({
+          hash: noteSendMeta.childCanonical,
+          direction: "receive",
+          amountPhi: noteSendMeta.amountPhi,
+          amountUsd: noteSendMeta.amountUsd != null ? noteSendMeta.amountUsd.toFixed(2) : undefined,
+        });
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("note send confirm failed", err);
+    }
+  }, [noteSendMeta]);
 
   const runOwnerAuthFlow = useCallback(
     async (args: {
@@ -1357,6 +1614,7 @@ if (receipt.receiptHash) {
           embeddedMeta: embeddedProofMeta,
           bundleHashValue: embeddedProofMeta?.bundleHash ?? "",
         });
+        confirmNoteSend();
       } else {
         setOwnerAuthVerified(null);
         setOwnerAuthStatus("Not present");
@@ -1364,7 +1622,7 @@ if (receipt.receiptHash) {
     } finally {
       setBusy(false);
     }
-  }, [currentPulse, runOwnerAuthFlow, slug, stampAuditFields, svgText]);
+  }, [confirmNoteSend, currentPulse, runOwnerAuthFlow, slug, stampAuditFields, svgText]);
 
   const identityAttested: AttestationState = hasKASOwnerSig ? (ownerAuthVerified === null ? "missing" : ownerAuthVerified) : "missing";
 
@@ -2387,10 +2645,11 @@ if (verified && typeof cacheBundleHash === "string" && cacheBundleHash.trim().le
         title: "Proof of Breath™",
         status: result.status === "ok" ? "VERIFIED" : result.status === "error" ? "FAILED" : "STANDBY",
 body: [
-  "Proof of Breath™ is the sovereign attestation that a ΦKey originates from a living human signature rail and that its integrity chain remains unbroken.",
-  "This badge is issued only when the inhaled ΦKey, its vessel hash, sigil hash, and attestation bundle collapse into a deterministic, recomputable proof capsule under canonical rules.",
+  "Proof of Breath™ is the sovereign attestation that a ΦKey originates from a living human presence-seal and that its proof stream remains unbroken.",
+  "This badge is issued only when the inhaled ΦKey, its vessel hash, sigil hash, and attestation bundle converge into a deterministic, recomputable proof capsule under canonical rules.",
   "No simulacra, no mutable links, no soft checks—only canonicalization, cryptographic determinism, and verifiable coherence.",
 ],
+
 
       };
     }
@@ -2704,6 +2963,58 @@ React.useEffect(() => {
     zkMeta?.zkPoseidonHash,
   ]);
 
+  const onDownloadNotePng = useCallback(async () => {
+    if (!noteSvgFromPng || noteClaimed) return;
+    const payloadBase = noteSendPayloadRaw
+      ? { ...noteSendPayloadRaw }
+      : noteSendMeta
+        ? {
+            parentCanonical: noteSendMeta.parentCanonical,
+            amountPhi: noteSendMeta.amountPhi,
+            amountUsd: noteSendMeta.amountUsd,
+            childCanonical: noteSendMeta.childCanonical,
+          }
+        : null;
+    const nextNonce = genNonce();
+    const noteSendPayload = payloadBase
+      ? {
+          ...payloadBase,
+          parentCanonical: payloadBase.parentCanonical || noteSendMeta?.parentCanonical,
+          amountPhi: noteSendMeta?.amountPhi ?? payloadBase.amountPhi,
+          amountUsd: noteSendMeta?.amountUsd ?? payloadBase.amountUsd,
+          transferNonce: nextNonce,
+        }
+      : null;
+
+    if (noteSendPayload && "childCanonical" in noteSendPayload) {
+      delete (noteSendPayload as { childCanonical?: unknown }).childCanonical;
+    }
+
+    const nonce = nextNonce ? `-${nextNonce.slice(0, 8)}` : "";
+    const filename = `kai-note${nonce}.png`;
+    const png = await svgStringToPngBlob(noteSvgFromPng, 2400);
+    const noteSendJson = noteSendPayload ? JSON.stringify(noteSendPayload) : "";
+    const entries = [
+      noteProofBundleJson ? { keyword: "phi_proof_bundle", text: noteProofBundleJson } : null,
+      sharedReceipt?.bundleHash ? { keyword: "phi_bundle_hash", text: sharedReceipt.bundleHash } : null,
+      sharedReceipt?.receiptHash ? { keyword: "phi_receipt_hash", text: sharedReceipt.receiptHash } : null,
+      noteSendJson ? { keyword: "phi_note_send", text: noteSendJson } : null,
+      { keyword: "phi_note_svg", text: noteSvgFromPng },
+    ].filter((entry): entry is { keyword: string; text: string } => Boolean(entry));
+
+    if (entries.length === 0) {
+      triggerDownload(filename, png, "image/png");
+      confirmNoteSend();
+      return;
+    }
+
+    const bytes = new Uint8Array(await png.arrayBuffer());
+    const enriched = insertPngTextChunks(bytes, entries);
+    const finalBlob = new Blob([enriched as BlobPart], { type: "image/png" });
+    triggerDownload(filename, finalBlob, "image/png");
+    confirmNoteSend();
+  }, [confirmNoteSend, noteClaimed, noteProofBundleJson, noteSendMeta, noteSendPayloadRaw, noteSvgFromPng, sharedReceipt]);
+
   const onDownloadVerifiedCard = useCallback(async () => {
     if (!verifiedCardData) return;
     await downloadVerifiedCardPng(verifiedCardData);
@@ -2955,6 +3266,14 @@ React.useEffect(() => {
           {proofCapsule ? (
             <div className="vreceipt-row" aria-label="Proof actions">
               <div className="vreceipt-label">Proof</div>
+              {noteClaimStatus ? (
+                <div
+                  className={`vnote-claim ${noteClaimed ? "vnote-claim--claimed" : "vnote-claim--unclaimed"}`}
+                  title={noteClaimed ? "This note has already been claimed." : "This note has not been claimed yet."}
+                >
+                  {noteClaimStatus}
+                </div>
+              ) : null}
               <div className="vreceipt-actions">
                 <button type="button" className="vbtn vbtn--ghost" onClick={() => void onShareReceipt()}>
                    ➦
@@ -2962,19 +3281,34 @@ React.useEffect(() => {
                 <button type="button" className="vbtn vbtn--ghost" onClick={() => void onCopyReceipt()}>
                   💠
                 </button>
-                <button
-                  type="button"
-                  className="vbtn vbtn--ghost"
-                  onClick={() => void onSignVerification()}
-                  title={verificationSigLabel}
-                  aria-label={verificationSigLabel}
-                  disabled={!canSignVerification || verificationSigBusy}
-                >
-                  ✍
-                </button>
-                <button type="button" className="vbtn vbtn--ghost" onClick={() => void onDownloadVerifiedCard()}>
-                  ⬇
-                </button>
+                {isExhaleNoteUpload ? null : (
+                  <button
+                    type="button"
+                    className="vbtn vbtn--ghost"
+                    onClick={() => void onSignVerification()}
+                    title={verificationSigLabel}
+                    aria-label={verificationSigLabel}
+                    disabled={!canSignVerification || verificationSigBusy}
+                  >
+                    ✍
+                  </button>
+                )}
+                {noteSvgFromPng && result.status === "ok" && !noteClaimed ? (
+                  <button
+                    type="button"
+                    className="vbtn vbtn--ghost"
+                    onClick={onDownloadNotePng}
+                    title="Download fresh note PNG"
+                    aria-label="Download fresh note PNG"
+                  >
+                    ⬇︎Φ
+                  </button>
+                ) : null}
+                {isExhaleNoteUpload ? null : (
+                  <button type="button" className="vbtn vbtn--ghost" onClick={() => void onDownloadVerifiedCard()}>
+                    ⬇
+                  </button>
+                )}
               </div>
             </div>
 
@@ -3077,7 +3411,7 @@ React.useEffect(() => {
                     ref={pngFileRef}
                     className="vfile"
                     type="file"
-                    accept=".png,image/png"
+                    accept=".png,image/png,.pdf,application/pdf"
                     onChange={(e) => {
                       handleFiles(e.currentTarget.files);
                       e.currentTarget.value = "";
@@ -3411,13 +3745,29 @@ React.useEffect(() => {
                 {result.status === "ok" && displayPhi != null ? (
                   <div className="vmini-grid vmini-grid--2 vvaluation-dashboard" aria-label="Live valuation">
                     <MiniField
-                      label={displaySource === "balance" ? "Glyph Φ balance" : displaySource === "embedded" ? "Glyph Φ value" : "Live Φ value"}
+                      label={
+                        displaySource === "note"
+                          ? "Note Φ value"
+                          : displaySource === "balance"
+                            ? "Glyph Φ balance"
+                            : displaySource === "embedded"
+                              ? "Glyph Φ value"
+                              : "Live Φ value"
+                      }
                       value={fmtPhi(displayPhi)}
                       onClick={() => openChartPopover("phi")}
                       ariaLabel="Open live chart for Φ value"
                     />
                     <MiniField
-                      label={displaySource === "balance" ? "Glyph USD balance" : displaySource === "embedded" ? "Glyph USD value" : "Live USD value"}
+                      label={
+                        displaySource === "note"
+                          ? "Note USD value"
+                          : displaySource === "balance"
+                            ? "Glyph USD balance"
+                            : displaySource === "embedded"
+                              ? "Glyph USD value"
+                              : "Live USD value"
+                      }
                       value={displayUsd == null ? "—" : fmtUsd(displayUsd)}
                       onClick={displayUsd == null ? undefined : () => openChartPopover("usd")}
                       ariaLabel="Open live chart for USD value"

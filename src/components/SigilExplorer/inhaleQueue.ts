@@ -9,6 +9,7 @@ import { memoryRegistry, isOnline } from "./registryStore";
 const hasWindow = typeof window !== "undefined";
 
 const INHALE_BATCH_MAX = 200;
+const INHALE_BATCH_MAX_BYTES = 220_000;
 const INHALE_DEBOUNCE_MS = 180;
 const INHALE_RETRY_BASE_MS = 1200;
 const INHALE_RETRY_MAX_MS = 12000;
@@ -219,11 +220,53 @@ async function flushInhaleQueue(): Promise<void> {
   try {
     const batch: Record<string, unknown>[] = [];
     const keys: string[] = [];
+    const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+    let currentBytes = 2;
+    let droppedOversize = false;
 
     for (const [k, v] of inhaleQueue) {
+      const next = [...batch, v];
+      const jsonPreview = JSON.stringify(next);
+      const size =
+        encoder != null
+          ? encoder.encode(jsonPreview).byteLength
+          : new Blob([jsonPreview]).size;
+
+      if (batch.length === 0 && size > INHALE_BATCH_MAX_BYTES) {
+        inhaleQueue.delete(k);
+        droppedOversize = true;
+        continue;
+      }
+
+      if (
+        batch.length > 0 &&
+        (batch.length >= INHALE_BATCH_MAX || size > INHALE_BATCH_MAX_BYTES)
+      ) {
+        break;
+      }
+
       batch.push(v);
       keys.push(k);
-      if (batch.length >= INHALE_BATCH_MAX) break;
+      currentBytes = size;
+
+      if (batch.length >= INHALE_BATCH_MAX || currentBytes >= INHALE_BATCH_MAX_BYTES) {
+        break;
+      }
+    }
+
+    if (droppedOversize) {
+      saveInhaleQueueToStorage();
+    }
+
+    if (batch.length === 0) {
+      inhaleRetryMs = 0;
+      if (inhaleQueue.size > 0) {
+        inhaleFlushTimer = window.setTimeout(() => {
+          inhaleFlushTimer = null;
+          void flushInhaleQueue();
+        }, 10);
+      }
+      return;
     }
 
     const json = JSON.stringify(batch);
@@ -232,10 +275,17 @@ async function flushInhaleQueue(): Promise<void> {
     fd.append("file", blob, `sigils_${randId()}.json`);
 
     const makeUrl = (base: string) => {
-      const url = new URL(API_INHALE_PATH, base);
+      if (base) {
+        const url = new URL(API_INHALE_PATH, base);
+        url.searchParams.set("include_state", "false");
+        url.searchParams.set("include_urls", "false");
+        return url.toString();
+      }
+
+      const url = new URL(API_INHALE_PATH, "http://placeholder");
       url.searchParams.set("include_state", "false");
       url.searchParams.set("include_urls", "false");
-      return url.toString();
+      return `${API_INHALE_PATH}${url.search}`;
     };
 
     const res = await apiFetchWithFailover(makeUrl, { method: "POST", body: fd });
