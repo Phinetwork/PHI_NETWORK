@@ -1,6 +1,15 @@
 // src/components/SigilExplorer/inhaleQueue.ts
 "use client";
 
+/**
+ * Inhale Outbox (mobile-first, cross-device reliable)
+ * - Durable: persists queue in localStorage
+ * - Mobile-safe: flush is attempted even during visibility flips (share sheet / download)
+ * - Boot-resume: reloads any pending outbox on startup and flushes when possible
+ * - Exit-chance: best-effort flush on pagehide/beforeunload
+ * - Retry: exponential backoff, but will NOT spin while offline/hidden
+ */
+
 import { apiFetchWithFailover, API_INHALE_PATH } from "./apiClient";
 import type { SigilSharePayloadLoose } from "./types";
 import {
@@ -28,7 +37,7 @@ const INHALE_BATCH_MAX = 200;
 const INHALE_BATCH_MAX_BYTES = 220_000;
 const INHALE_DEBOUNCE_MS = 180;
 const INHALE_RETRY_BASE_MS = 1200;
-const INHALE_RETRY_MAX_MS = 12000;
+const INHALE_RETRY_MAX_MS = 12_000;
 
 export const INHALE_QUEUE_LS_KEY = "kai:inhaleQueue:v1";
 
@@ -37,9 +46,6 @@ let inhaleFlushTimer: number | null = null;
 let inhaleInFlight = false;
 let inhaleRetryMs = 0;
 
-const canMatchMedia = hasWindow && typeof window.matchMedia === "function";
-const isCoarsePointer = canMatchMedia && window.matchMedia("(pointer: coarse)").matches;
-
 function isVisible(): boolean {
   if (!hasWindow) return false;
   if (typeof document === "undefined") return true;
@@ -47,37 +53,21 @@ function isVisible(): boolean {
 }
 
 function shouldFastFlush(): boolean {
+  // NO pointer-gating; on iOS / iPad trackpad this can be "fine"
   if (!hasWindow) return false;
-  if (!isCoarsePointer) return false;
-  if (typeof document === "undefined") return false;
+  if (typeof document === "undefined") return true;
   return document.visibilityState === "visible";
 }
 
 function scheduleFastFlush(): void {
+  // Only schedule fast flush when visible; background flush is still allowed
+  // via explicit calls (pagehide) and the 180ms debounce path.
   if (!shouldFastFlush()) return;
   const run = () => void flushInhaleQueue();
   if (typeof queueMicrotask === "function") {
     queueMicrotask(run);
   } else {
     window.setTimeout(run, 0);
-  }
-}
-
-// ✅ Wake flush when the tab becomes visible or returns online (mobile-safe)
-if (hasWindow) {
-  try {
-    window.addEventListener("online", () => scheduleFastFlush());
-  } catch {
-    // ignore
-  }
-  if (typeof document !== "undefined") {
-    try {
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") scheduleFastFlush();
-      });
-    } catch {
-      // ignore
-    }
   }
 }
 
@@ -127,15 +117,13 @@ function loadInhaleQueueFromStorage(): void {
   }
 }
 
-function enqueueInhaleRawKrystal(krystal: Record<string, unknown>): void {
-  const urlVal = krystal.url;
-  if (typeof urlVal !== "string" || !urlVal.trim()) return;
-
-  const abs = canonicalizeUrl(urlVal.trim());
-  inhaleQueue.set(abs, { ...krystal, url: abs });
-  saveInhaleQueueToStorage();
-
+/**
+ * Internal helper: schedule a debounced flush (safe on all platforms).
+ * Also triggers a microtask flush if visible.
+ */
+function scheduleDebouncedFlush(): void {
   if (!hasWindow) return;
+
   if (inhaleFlushTimer != null) window.clearTimeout(inhaleFlushTimer);
   inhaleFlushTimer = window.setTimeout(() => {
     inhaleFlushTimer = null;
@@ -145,21 +133,26 @@ function enqueueInhaleRawKrystal(krystal: Record<string, unknown>): void {
   scheduleFastFlush();
 }
 
+function enqueueInhaleRawKrystal(krystal: Record<string, unknown>): void {
+  const urlVal = krystal.url;
+  if (typeof urlVal !== "string" || !urlVal.trim()) return;
+
+  const abs = canonicalizeUrl(urlVal.trim());
+  inhaleQueue.set(abs, { ...krystal, url: abs });
+  saveInhaleQueueToStorage();
+
+  scheduleDebouncedFlush();
+}
+
 function enqueueInhaleKrystal(url: string, payload: SigilSharePayloadLoose): void {
   const abs = canonicalizeUrl(url);
   const rec = payload as unknown as Record<string, unknown>;
   const krystal: Record<string, unknown> = { url: abs, ...rec };
+
   inhaleQueue.set(abs, krystal);
   saveInhaleQueueToStorage();
 
-  if (!hasWindow) return;
-  if (inhaleFlushTimer != null) window.clearTimeout(inhaleFlushTimer);
-  inhaleFlushTimer = window.setTimeout(() => {
-    inhaleFlushTimer = null;
-    void flushInhaleQueue();
-  }, INHALE_DEBOUNCE_MS);
-
-  scheduleFastFlush();
+  scheduleDebouncedFlush();
 }
 
 /**
@@ -173,6 +166,7 @@ function seedInhaleFromRegistry(): void {
     inhaleQueue.set(url, { url, ...rec });
   }
   saveInhaleQueueToStorage();
+  scheduleDebouncedFlush();
 }
 
 function safeDecodeURIComponent(v: string): string {
@@ -260,10 +254,9 @@ function forceInhaleUrls(urls: readonly string[]): void {
 async function flushInhaleQueue(): Promise<void> {
   if (!hasWindow) return;
 
-  // ✅ Don’t run flush work in background tabs (iOS stability)
-  if (!isVisible()) return;
-
-  if (!isOnline()) return;
+  // IMPORTANT:
+  // - We attempt a flush even if iOS flips visibility during share/download.
+  // - We do NOT spin retries while offline/hidden (see catch block).
   if (inhaleInFlight) return;
   if (inhaleQueue.size === 0) return;
 
@@ -278,15 +271,16 @@ async function flushInhaleQueue(): Promise<void> {
     for (const [k, v] of inhaleQueue) {
       const next = batch.length === 0 ? [v] : [...batch, v];
       const jsonPreview = JSON.stringify(next);
-      const size =
-        encoder != null ? encoder.encode(jsonPreview).byteLength : new Blob([jsonPreview]).size;
+      const size = encoder != null ? encoder.encode(jsonPreview).byteLength : new Blob([jsonPreview]).size;
 
+      // Single item too big: drop it (can't send)
       if (batch.length === 0 && size > INHALE_BATCH_MAX_BYTES) {
         inhaleQueue.delete(k);
         droppedOversize = true;
         continue;
       }
 
+      // Would exceed batch limits: stop and send current batch
       if (batch.length > 0 && (batch.length >= INHALE_BATCH_MAX || size > INHALE_BATCH_MAX_BYTES)) {
         break;
       }
@@ -294,13 +288,12 @@ async function flushInhaleQueue(): Promise<void> {
       batch.push(v);
       keys.push(k);
 
-      if (batch.length >= INHALE_BATCH_MAX || size >= INHALE_BATCH_MAX_BYTES) {
-        break;
-      }
+      if (batch.length >= INHALE_BATCH_MAX || size >= INHALE_BATCH_MAX_BYTES) break;
     }
 
     if (droppedOversize) saveInhaleQueueToStorage();
 
+    // If everything was oversize, we're done for now.
     if (batch.length === 0) {
       inhaleRetryMs = 0;
       if (inhaleQueue.size > 0) {
@@ -309,6 +302,12 @@ async function flushInhaleQueue(): Promise<void> {
           void flushInhaleQueue();
         }, 10);
       }
+      return;
+    }
+
+    // If offline, bail *without retry spin* (listeners will wake)
+    if (!isOnline()) {
+      inhaleRetryMs = 0;
       return;
     }
 
@@ -325,6 +324,7 @@ async function flushInhaleQueue(): Promise<void> {
         return url.toString();
       }
 
+      // proxy base "" -> relative request
       const url = new URL(API_INHALE_PATH, "http://placeholder");
       url.searchParams.set("include_state", "false");
       url.searchParams.set("include_urls", "false");
@@ -341,10 +341,12 @@ async function flushInhaleQueue(): Promise<void> {
       // ignore
     }
 
+    // ✅ success: remove sent keys
     for (const k of keys) inhaleQueue.delete(k);
     saveInhaleQueueToStorage();
     inhaleRetryMs = 0;
 
+    // If more remains, keep draining fast
     if (inhaleQueue.size > 0) {
       inhaleFlushTimer = window.setTimeout(() => {
         inhaleFlushTimer = null;
@@ -352,16 +354,14 @@ async function flushInhaleQueue(): Promise<void> {
       }, 10);
     }
   } catch {
-    // ✅ If offline/hidden, don’t spin retries—listeners will wake us.
+    // If offline/hidden, do not spin retries.
+    // When we return visible/online, our listeners or boot flush will wake us.
     if (!isOnline() || !isVisible()) {
       inhaleRetryMs = 0;
       return;
     }
 
-    inhaleRetryMs = Math.min(
-      inhaleRetryMs ? inhaleRetryMs * 2 : INHALE_RETRY_BASE_MS,
-      INHALE_RETRY_MAX_MS,
-    );
+    inhaleRetryMs = Math.min(inhaleRetryMs ? inhaleRetryMs * 2 : INHALE_RETRY_BASE_MS, INHALE_RETRY_MAX_MS);
 
     inhaleFlushTimer = window.setTimeout(() => {
       inhaleFlushTimer = null;
@@ -369,6 +369,55 @@ async function flushInhaleQueue(): Promise<void> {
     }, inhaleRetryMs);
   } finally {
     inhaleInFlight = false;
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────
+   ✅ Mobile-first wake + boot resume
+─────────────────────────────────────────────────────────────── */
+
+// Wake flush when tab becomes visible or returns online.
+if (hasWindow) {
+  try {
+    window.addEventListener("online", () => scheduleFastFlush());
+  } catch {
+    // ignore
+  }
+
+  if (typeof document !== "undefined") {
+    try {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") scheduleFastFlush();
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  // Best-effort “last chance” flush when leaving (iOS pagehide is key).
+  try {
+    window.addEventListener("pagehide", () => {
+      void flushInhaleQueue();
+    });
+  } catch {
+    // ignore
+  }
+
+  // Some browsers still fire beforeunload (desktop).
+  try {
+    window.addEventListener("beforeunload", () => {
+      void flushInhaleQueue();
+    });
+  } catch {
+    // ignore
+  }
+
+  // ✅ Boot: reload any pending outbox and try immediately.
+  try {
+    loadInhaleQueueFromStorage();
+    if (inhaleQueue.size > 0) scheduleFastFlush();
+  } catch {
+    // ignore
   }
 }
 
