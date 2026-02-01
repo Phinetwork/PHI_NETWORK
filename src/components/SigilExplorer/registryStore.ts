@@ -74,21 +74,6 @@ type RegistryEvent =
   | { type: "sigil:add"; url: string }
   | { type: "note:claim"; parentCanonical: string; transferNonce: string };
 
-export function isStandaloneDisplayMode(): boolean {
-  if (!hasWindow) return false;
-  if (typeof window.matchMedia === "function") {
-    try {
-      return window.matchMedia("(display-mode: standalone)").matches;
-    } catch {
-      /* ignore */
-    }
-  }
-  if (typeof navigator !== "undefined" && "standalone" in navigator) {
-    return Boolean((navigator as { standalone?: boolean }).standalone);
-  }
-  return false;
-}
-
 export function isOnline(): boolean {
   if (!hasWindow) return false;
   if (typeof navigator === "undefined") return true;

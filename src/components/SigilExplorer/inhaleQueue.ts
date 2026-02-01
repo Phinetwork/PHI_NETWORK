@@ -11,7 +11,7 @@ import {
   parseStreamToken,
   streamUrlFromToken,
 } from "./url";
-import { isOnline, isStandaloneDisplayMode, memoryRegistry } from "./registryStore";
+import { memoryRegistry, isOnline } from "./registryStore";
 
 const hasWindow = typeof window !== "undefined";
 const canStorage =
@@ -29,7 +29,6 @@ const INHALE_BATCH_MAX_BYTES = 220_000;
 const INHALE_DEBOUNCE_MS = 180;
 const INHALE_RETRY_BASE_MS = 1200;
 const INHALE_RETRY_MAX_MS = 12000;
-const STANDALONE_OFFLINE_RETRY_MS = 15000;
 
 export const INHALE_QUEUE_LS_KEY = "kai:inhaleQueue:v1";
 
@@ -37,7 +36,6 @@ const inhaleQueue: Map<string, Record<string, unknown>> = new Map();
 let inhaleFlushTimer: number | null = null;
 let inhaleInFlight = false;
 let inhaleRetryMs = 0;
-let standaloneOfflineUntil = 0;
 
 const canMatchMedia = hasWindow && typeof window.matchMedia === "function";
 const isCoarsePointer = canMatchMedia && window.matchMedia("(pointer: coarse)").matches;
@@ -265,10 +263,7 @@ async function flushInhaleQueue(): Promise<void> {
   // ✅ Don’t run flush work in background tabs (iOS stability)
   if (!isVisible()) return;
 
-  const online = isOnline();
-  const allowOfflineProbe =
-    !online && isStandaloneDisplayMode() && Date.now() >= standaloneOfflineUntil;
-  if (!online && !allowOfflineProbe) return;
+  if (!isOnline()) return;
   if (inhaleInFlight) return;
   if (inhaleQueue.size === 0) return;
 
@@ -349,7 +344,6 @@ async function flushInhaleQueue(): Promise<void> {
     for (const k of keys) inhaleQueue.delete(k);
     saveInhaleQueueToStorage();
     inhaleRetryMs = 0;
-    standaloneOfflineUntil = 0;
 
     if (inhaleQueue.size > 0) {
       inhaleFlushTimer = window.setTimeout(() => {
@@ -360,9 +354,6 @@ async function flushInhaleQueue(): Promise<void> {
   } catch {
     // ✅ If offline/hidden, don’t spin retries—listeners will wake us.
     if (!isOnline() || !isVisible()) {
-      if (isStandaloneDisplayMode()) {
-        standaloneOfflineUntil = Date.now() + STANDALONE_OFFLINE_RETRY_MS;
-      }
       inhaleRetryMs = 0;
       return;
     }
