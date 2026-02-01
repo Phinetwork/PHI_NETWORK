@@ -74,7 +74,7 @@ type RegistryEvent =
   | { type: "sigil:add"; url: string }
   | { type: "note:claim"; parentCanonical: string; transferNonce: string };
 
-function isStandaloneDisplayMode(): boolean {
+export function isStandaloneDisplayMode(): boolean {
   if (!hasWindow) return false;
   if (typeof window.matchMedia === "function") {
     try {
@@ -92,9 +92,6 @@ function isStandaloneDisplayMode(): boolean {
 export function isOnline(): boolean {
   if (!hasWindow) return false;
   if (typeof navigator === "undefined") return true;
-  if (navigator.onLine) return true;
-  // PWA/standalone sometimes reports false negatives for online status.
-  if (navigator.onLine === false && isStandaloneDisplayMode()) return true;
   return navigator.onLine;
 }
 
