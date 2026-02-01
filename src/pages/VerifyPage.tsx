@@ -3360,93 +3360,118 @@ React.useEffect(() => {
     verificationVersion,
     zkMeta?.zkPoseidonHash,
   ]);
+const onDownloadNotePng = useCallback(async () => {
+  if (noteDownloadInFlightRef.current) return;
+  noteDownloadInFlightRef.current = true;
+  noteDownloadBypassRef.current = true;
 
-  const onDownloadNotePng = useCallback(async () => {
-    if (noteDownloadInFlightRef.current) return;
-    noteDownloadInFlightRef.current = true;
-    noteDownloadBypassRef.current = true;
-    if (!noteSvgFromPng || (noteClaimedFinal && !noteDownloadBypassRef.current)) {
-      noteDownloadBypassRef.current = false;
-      noteDownloadInFlightRef.current = false;
-      return;
+  // Must have a note SVG loaded (we are “re-minting” from an existing note)
+  if (!noteSvgFromPng) {
+    noteDownloadBypassRef.current = false;
+    noteDownloadInFlightRef.current = false;
+    return;
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // 1) Identify the CURRENT note leaf (this is the parent that must be claimed)
+  // ────────────────────────────────────────────────────────────────
+  const parentMeta: NoteSendMeta | null =
+    effectiveNoteMeta ??
+    (noteSendMeta ?? (noteSendPayloadRaw ? buildNoteSendMetaFromObjectLoose(noteSendPayloadRaw) : null));
+
+  const parentPayloadRaw: Record<string, unknown> | null = noteSendPayloadRaw ?? null;
+
+  if (!parentMeta?.parentCanonical || !parentMeta.transferNonce) {
+    setNotice("Missing parent rotation-seal (transferNonce). Cannot mint a child note from this file.");
+    noteDownloadBypassRef.current = false;
+    noteDownloadInFlightRef.current = false;
+    return;
+  }
+
+  // If parent is already claimed, do not allow minting a child
+  if (!noteDownloadBypassRef.current && noteClaimedFinal) {
+    noteDownloadBypassRef.current = false;
+    noteDownloadInFlightRef.current = false;
+    return;
+  }
+
+  const claimedPulse = currentPulse ?? getKaiPulseEternalInt(new Date());
+
+  try {
+    // ────────────────────────────────────────────────────────────────
+    // 2) Build NEW child note payload (new nonce) to embed into the export
+    //    IMPORTANT: this NEW nonce must NOT be marked claimed here.
+    // ────────────────────────────────────────────────────────────────
+    const payloadBase = parentPayloadRaw ? { ...parentPayloadRaw } : {};
+
+    // Strip any parent-leaf fields we must not carry forward
+    delete (payloadBase as { transferLeafHashSend?: unknown }).transferLeafHashSend;
+    delete (payloadBase as { transferLeafHash?: unknown }).transferLeafHash;
+    delete (payloadBase as { leafHash?: unknown }).leafHash;
+    delete (payloadBase as { childCanonical?: unknown }).childCanonical;
+
+    const nextNonce = genNonce();
+
+    const childNoteSendPayload: Record<string, unknown> = {
+      ...payloadBase,
+      parentCanonical: parentMeta.parentCanonical,
+      amountPhi: parentMeta.amountPhi,
+      amountUsd: parentMeta.amountUsd,
+      transferNonce: nextNonce,
+    };
+
+    const nonceSuffix = nextNonce ? `-${String(nextNonce).slice(0, 8)}` : "";
+    const filename = `☤KAI-NOTE${nonceSuffix}.png`;
+
+    const png = await svgStringToPngBlob(noteSvgFromPng, 2400);
+
+    const noteSendJson = JSON.stringify(childNoteSendPayload);
+
+    const entries = [
+      noteProofBundleJson ? { keyword: "phi_proof_bundle", text: noteProofBundleJson } : null,
+      sharedReceipt?.bundleHash ? { keyword: "phi_bundle_hash", text: sharedReceipt.bundleHash } : null,
+      sharedReceipt?.receiptHash ? { keyword: "phi_receipt_hash", text: sharedReceipt.receiptHash } : null,
+      { keyword: "phi_note_send", text: noteSendJson }, // ✅ NEW leaf embedded
+      { keyword: "phi_note_svg", text: noteSvgFromPng },
+    ].filter((e): e is { keyword: string; text: string } => Boolean(e));
+
+    if (entries.length === 0) {
+      triggerDownload(filename, png, "image/png");
+    } else {
+      const bytes = new Uint8Array(await png.arrayBuffer());
+      const enriched = insertPngTextChunks(bytes, entries);
+      const finalBlob = new Blob([enriched as BlobPart], { type: "image/png" });
+      triggerDownload(filename, finalBlob, "image/png");
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Note download failed.";
+    setNotice(msg);
+  } finally {
+    noteDownloadBypassRef.current = false;
+    noteDownloadInFlightRef.current = false;
 
-    const parentMeta =
-      noteSendMeta ?? (noteSendPayloadRaw ? buildNoteSendMetaFromObjectLoose(noteSendPayloadRaw) : null);
-    const parentPayloadRaw = noteSendPayloadRaw ?? null;
-    try {
-      const payloadBase = noteSendPayloadRaw
-        ? { ...noteSendPayloadRaw }
-        : noteSendMeta
-          ? {
-              parentCanonical: noteSendMeta.parentCanonical,
-              amountPhi: noteSendMeta.amountPhi,
-              amountUsd: noteSendMeta.amountUsd,
-              childCanonical: noteSendMeta.childCanonical,
-            }
-          : null;
+    // ────────────────────────────────────────────────────────────────
+    // 3) CLAIM THE PARENT LEAF (the note you just used to mint the child)
+    //    This is the key: parent shows CLAIMED, child stays UNCLAIMED.
+    // ────────────────────────────────────────────────────────────────
+    confirmNoteSend({
+      meta: parentMeta,
+      payloadRaw: parentPayloadRaw,
+      claimedPulse,
+    });
+  }
+}, [
+  confirmNoteSend,
+  currentPulse,
+  effectiveNoteMeta,
+  noteClaimedFinal,
+  noteProofBundleJson,
+  noteSendMeta,
+  noteSendPayloadRaw,
+  noteSvgFromPng,
+  sharedReceipt,
+]);
 
-      const nextNonce = genNonce();
-
-      const noteSendPayload = payloadBase
-        ? {
-            ...payloadBase,
-            parentCanonical: payloadBase.parentCanonical || noteSendMeta?.parentCanonical,
-            amountPhi: noteSendMeta?.amountPhi ?? payloadBase.amountPhi,
-            amountUsd: noteSendMeta?.amountUsd ?? payloadBase.amountUsd,
-            transferNonce: nextNonce,
-          }
-        : null;
-
-      if (noteSendPayload && "childCanonical" in noteSendPayload) {
-        delete (noteSendPayload as { childCanonical?: unknown }).childCanonical;
-      }
-
-      const nonce = nextNonce ? `-${nextNonce.slice(0, 8)}` : "";
-      const filename = `☤KAI-NOTE${nonce}.png`;
-
-      const png = await svgStringToPngBlob(noteSvgFromPng, 2400);
-
-      const noteSendJson = noteSendPayload ? JSON.stringify(noteSendPayload) : "";
-      const entries = [
-        noteProofBundleJson ? { keyword: "phi_proof_bundle", text: noteProofBundleJson } : null,
-        sharedReceipt?.bundleHash ? { keyword: "phi_bundle_hash", text: sharedReceipt.bundleHash } : null,
-        sharedReceipt?.receiptHash ? { keyword: "phi_receipt_hash", text: sharedReceipt.receiptHash } : null,
-        noteSendJson ? { keyword: "phi_note_send", text: noteSendJson } : null,
-        { keyword: "phi_note_svg", text: noteSvgFromPng },
-      ].filter((entry): entry is { keyword: string; text: string } => Boolean(entry));
-
-      if (entries.length === 0) {
-        triggerDownload(filename, png, "image/png");
-      } else {
-        const bytes = new Uint8Array(await png.arrayBuffer());
-        const enriched = insertPngTextChunks(bytes, entries);
-        const finalBlob = new Blob([enriched as BlobPart], { type: "image/png" });
-        triggerDownload(filename, finalBlob, "image/png");
-      }
-
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Note download failed.";
-      setNotice(msg);
-    } finally {
-      noteDownloadBypassRef.current = false;
-      noteDownloadInFlightRef.current = false;
-      // ✅ ALWAYS flip claim + force UI refresh (mobile-safe)
-      if (parentMeta) {
-        confirmNoteSend({ meta: parentMeta, payloadRaw: parentPayloadRaw });
-      } else {
-        confirmNoteSend();
-      }
-    }
-  }, [
-    confirmNoteSend,
-    noteClaimedFinal,
-    noteProofBundleJson,
-    noteSendMeta,
-    noteSendPayloadRaw,
-    noteSvgFromPng,
-    sharedReceipt,
-  ]);
 
   const onDownloadVerifiedCard = useCallback(async () => {
     if (!verifiedCardData) return;

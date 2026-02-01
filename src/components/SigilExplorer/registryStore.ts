@@ -320,62 +320,93 @@ function ensureNoteClaimsHydrated(): void {
   noteClaimsHydrated = true;
   hydrateNoteClaimsFromStorage();
 }
-
 export function markNoteClaimed(
   parentCanonical: string,
   transferNonce: string,
   args?: { childCanonical?: string; claimedPulse?: number; transferLeafHash?: string },
 ): boolean {
+  // ✅ hydrate both claims + registry before we operate
   ensureNoteClaimsHydrated();
+  ensureRegistryHydrated?.(); // keep if you have it; safe no-op otherwise
+
   const parentKey = normalizeCanonical(parentCanonical);
   const nonce = normalizeNonce(transferNonce);
   if (!parentKey || !nonce) return false;
 
+  const claimedPulse =
+    typeof args?.claimedPulse === "number" && Number.isFinite(args.claimedPulse) ? args.claimedPulse : 0;
+
+  const childCanonical = normalizeCanonical(args?.childCanonical);
+  const transferLeafHash = typeof args?.transferLeafHash === "string" ? args.transferLeafHash : undefined;
+
+  // ─────────────────────────────────────────────────────────────
+  // 1) Update claim registry (only if changed)
+  // ─────────────────────────────────────────────────────────────
   const map = noteClaimRegistry.get(parentKey) ?? new Map<string, NoteClaimRecord>();
   const existing = map.get(nonce);
-  const claimedPulse = Number.isFinite(args?.claimedPulse ?? NaN) ? Number(args?.claimedPulse) : 0;
 
   const next: NoteClaimRecord = {
     nonce,
-    claimedPulse: existing?.claimedPulse || claimedPulse,
-    childCanonical: existing?.childCanonical || normalizeCanonical(args?.childCanonical),
-    transferLeafHash: existing?.transferLeafHash || args?.transferLeafHash,
+    // keep the first non-zero pulse we ever saw, else take new pulse
+    claimedPulse: (existing?.claimedPulse ?? 0) > 0 ? (existing!.claimedPulse as number) : claimedPulse,
+    childCanonical: existing?.childCanonical || childCanonical,
+    transferLeafHash: existing?.transferLeafHash || transferLeafHash,
   };
 
-  const changed =
+  const claimChanged =
     !existing ||
     next.claimedPulse !== existing.claimedPulse ||
     next.childCanonical !== existing.childCanonical ||
     next.transferLeafHash !== existing.transferLeafHash;
 
-  if (!changed) return false;
+  if (claimChanged) {
+    map.set(nonce, next);
+    noteClaimRegistry.set(parentKey, map);
+    persistNoteClaimsToStorage();
+  }
 
-  map.set(nonce, next);
-  noteClaimRegistry.set(parentKey, map);
-
-  persistNoteClaimsToStorage();
-
+  // ─────────────────────────────────────────────────────────────
+  // 2) ALWAYS materialize + persist the claim URL into the global registry
+  //    (this is the “infinite generations” fix)
+  // ─────────────────────────────────────────────────────────────
   const claimPayload = buildNoteClaimPayload({
     parentCanonical: parentKey,
     transferNonce: nonce,
-    childCanonical: args?.childCanonical,
-    claimedPulse,
+    childCanonical: childCanonical || undefined,
+    claimedPulse: next.claimedPulse || claimedPulse || undefined,
   });
+
   const claimUrl = buildNoteClaimUrl({
     parentCanonical: parentKey,
     transferNonce: nonce,
-    childCanonical: args?.childCanonical,
-    claimedPulse,
+    childCanonical: childCanonical || undefined,
+    claimedPulse: next.claimedPulse || claimedPulse || undefined,
   });
 
+  // These are idempotent; call every time so registry repairs itself after cache clears.
   upsertRegistryPayload(claimUrl, claimPayload);
   enqueueInhaleKrystal(claimUrl, claimPayload);
 
-  // ✅ notify listeners (mobile-safe)
+  // ✅ persist registry list EVERY TIME
+  persistRegistryToStorage();
+
+  // Optional: keep modal fallback aligned too
+  if (canStorage) {
+    try {
+      const urls = Array.from(memoryRegistry.keys());
+      localStorage.setItem(MODAL_FALLBACK_LS_KEY, JSON.stringify(urls));
+    } catch {
+      /* ignore */
+    }
+  }
+
   safeRegistryPost({ type: "note:claim", parentCanonical: parentKey, transferNonce: nonce });
 
-  return true;
+  // return “did something”
+  return claimChanged;
 }
+
+
 
 export function isNoteClaimed(parentCanonical: string, transferNonce: string): boolean {
   ensureNoteClaimsHydrated();
