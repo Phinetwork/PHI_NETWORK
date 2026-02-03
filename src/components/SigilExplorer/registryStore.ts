@@ -6,7 +6,11 @@ import type { Registry, SigilSharePayloadLoose } from "./types";
 import { USERNAME_CLAIM_KIND, type UsernameClaimPayload } from "../../types/usernameClaim";
 import { ingestUsernameClaimGlyph } from "../../utils/usernameClaimRegistry";
 import { normalizeClaimGlyphRef, normalizeUsername } from "../../utils/usernameClaim";
-import { makeSigilUrlLoose, resolveLineageBackwards, type SigilSharePayloadLoose as SigilUrlPayloadLoose } from "../../utils/sigilUrl";
+import {
+  makeSigilUrlLoose,
+  resolveLineageBackwards,
+  type SigilSharePayloadLoose as SigilUrlPayloadLoose,
+} from "../../utils/sigilUrl";
 import { getInMemorySigilUrls } from "../../utils/sigilRegistry";
 import { markConfirmedByNonce } from "../../utils/sendLedger";
 import {
@@ -25,6 +29,10 @@ export const MODAL_FALLBACK_LS_KEY = "sigil:urls"; // composer/modal fallback UR
 export const NOTE_CLAIM_LS_KEY = "kai:sigil-claims:v1"; // persistent note-claim registry
 const BC_NAME = "kai-sigil-registry";
 
+// ✅ mobile-safe invalidation channels (same-tab + cross-tab)
+const EVT_REGISTRY = "kai:sigil-registry:v1:changed";
+const LS_REGISTRY_BUMP = "kai:sigil-registry:v1:bump";
+
 const WITNESS_ADD_MAX = 512;
 
 const hasWindow = typeof window !== "undefined";
@@ -33,7 +41,16 @@ let registryHydrated = false;
 let noteClaimsHydrated = false;
 
 export const memoryRegistry: Registry = new Map();
-const noteClaimRegistry: Map<string, Set<string>> = new Map();
+
+export type NoteClaimRecord = {
+  nonce: string;
+  claimedPulse: number;
+  childCanonical?: string;
+  transferLeafHash?: string;
+};
+
+type NoteClaimMap = Map<string, NoteClaimRecord>;
+const noteClaimRegistry: Map<string, NoteClaimMap> = new Map();
 const channel = hasWindow && "BroadcastChannel" in window ? new BroadcastChannel(BC_NAME) : null;
 
 export type AddSource = "local" | "remote" | "hydrate" | "import";
@@ -50,13 +67,101 @@ type NoteClaimArgs = {
   parentCanonical: string;
   transferNonce: string;
   childCanonical?: string;
+  claimedPulse?: number;
 };
+
+type RegistryEvent =
+  | { type: "sigil:add"; url: string }
+  | { type: "note:claim"; parentCanonical: string; transferNonce: string };
 
 export function isOnline(): boolean {
   if (!hasWindow) return false;
   if (typeof navigator === "undefined") return true;
   return navigator.onLine;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   ✅ Mobile-safe registry invalidation
+─────────────────────────────────────────────────────────────── */
+
+/**
+ * Emit an invalidation event that works:
+ * - same-tab: CustomEvent (works everywhere, including iOS WKWebView)
+ * - cross-tab: localStorage bump (storage event), even if BroadcastChannel is missing/flaky
+ */
+function emitRegistryLocal(evt: RegistryEvent): void {
+  if (!hasWindow) return;
+
+  // Same-tab signal
+  try {
+    window.dispatchEvent(new CustomEvent(EVT_REGISTRY, { detail: evt }));
+  } catch {
+    /* ignore */
+  }
+
+  // Cross-tab signal (storage event fires in other tabs)
+  try {
+    if (canStorage) localStorage.setItem(LS_REGISTRY_BUMP, String(Date.now()));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Fire-and-forget registry notification. */
+function safeRegistryPost(evt: RegistryEvent): void {
+  try {
+    channel?.postMessage(evt);
+  } catch {
+    /* ignore */
+  }
+  emitRegistryLocal(evt);
+}
+
+/**
+ * Coarse listener for registry changes (URLs or note-claims).
+ * Use this in pages (VerifyPage) to re-render when the registry changes.
+ */
+export function listenRegistry(cb: () => void): () => void {
+  if (!hasWindow) return () => {};
+
+  let scheduled = false;
+  const fire = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      cb();
+    });
+  };
+
+  const unsubs: Array<() => void> = [];
+
+  // BroadcastChannel (if available)
+  if (channel) {
+    const onMsg = () => fire();
+    channel.addEventListener("message", onMsg as EventListener);
+    unsubs.push(() => channel.removeEventListener("message", onMsg as EventListener));
+  }
+
+  // Same-tab CustomEvent (always)
+  const onEvt = () => fire();
+  window.addEventListener(EVT_REGISTRY, onEvt as EventListener);
+  unsubs.push(() => window.removeEventListener(EVT_REGISTRY, onEvt as EventListener));
+
+  // Cross-tab storage fallback
+  const onStorage = (e: StorageEvent) => {
+    const k = e.key || "";
+    if (k === REGISTRY_LS_KEY || k === NOTE_CLAIM_LS_KEY || k === LS_REGISTRY_BUMP) fire();
+  };
+  window.addEventListener("storage", onStorage);
+  unsubs.push(() => window.removeEventListener("storage", onStorage));
+
+  return () => unsubs.forEach((fn) => fn());
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Helpers
+─────────────────────────────────────────────────────────────── */
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -68,6 +173,17 @@ function readStringField(obj: unknown, key: string): string | undefined {
   if (typeof v !== "string") return undefined;
   const t = v.trim();
   return t ? t : undefined;
+}
+
+function readNumberField(obj: unknown, key: string): number | undefined {
+  if (!isRecord(obj)) return undefined;
+  const v = obj[key];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
 }
 
 function readTransferDirectionValue(value: unknown): "send" | "receive" | null {
@@ -98,9 +214,10 @@ function normalizeNonce(raw: string | undefined | null): string {
 }
 
 function buildNoteClaimPayload(args: NoteClaimArgs): SigilUrlPayloadLoose {
-  const { parentCanonical, transferNonce, childCanonical } = args;
+  const { parentCanonical, transferNonce, childCanonical, claimedPulse } = args;
+  const claimedPulseValue = Number.isFinite(claimedPulse ?? NaN) ? Number(claimedPulse) : 0;
   const payload: SigilUrlPayloadLoose = {
-    pulse: 0,
+    pulse: claimedPulseValue,
     beat: 0,
     stepIndex: 0,
     chakraDay: "Root",
@@ -108,6 +225,7 @@ function buildNoteClaimPayload(args: NoteClaimArgs): SigilUrlPayloadLoose {
     transferNonce,
     parentCanonical,
   };
+  if (claimedPulseValue > 0) payload.claimedPulse = claimedPulseValue;
   if (childCanonical) {
     payload.canonicalHash = childCanonical;
     payload.childHash = childCanonical;
@@ -133,17 +251,49 @@ function hydrateNoteClaimsFromStorage(): boolean {
       if (!Array.isArray(value)) continue;
       const parentKey = normalizeCanonical(parent);
       if (!parentKey) continue;
-      const set = noteClaimRegistry.get(parentKey) ?? new Set<string>();
+      const map = noteClaimRegistry.get(parentKey) ?? new Map<string, NoteClaimRecord>();
       for (const entry of value) {
-        if (typeof entry !== "string") continue;
-        const nonce = normalizeNonce(entry);
-        if (!nonce) continue;
-        if (!set.has(nonce)) {
-          set.add(nonce);
+        if (typeof entry === "string") {
+          const nonce = normalizeNonce(entry);
+          if (!nonce || map.has(nonce)) continue;
+          map.set(nonce, { nonce, claimedPulse: 0 });
           changed = true;
+          continue;
+        }
+        if (!isRecord(entry)) continue;
+        const nonce = normalizeNonce(readStringField(entry, "nonce"));
+        if (!nonce) continue;
+        const claimedPulse = Number(entry.claimedPulse ?? entry.claimedAt ?? 0);
+        const childCanonical = normalizeCanonical(readStringField(entry, "childCanonical"));
+        const transferLeafHash = readStringField(entry, "transferLeafHash") ?? undefined;
+        const existing = map.get(nonce);
+        const next: NoteClaimRecord = {
+          nonce,
+          claimedPulse: Number.isFinite(claimedPulse) ? claimedPulse : 0,
+          childCanonical: childCanonical || undefined,
+          transferLeafHash,
+        };
+        if (!existing) {
+          map.set(nonce, next);
+          changed = true;
+        } else {
+          const merged: NoteClaimRecord = {
+            nonce,
+            claimedPulse: existing.claimedPulse || next.claimedPulse,
+            childCanonical: existing.childCanonical || next.childCanonical,
+            transferLeafHash: existing.transferLeafHash || next.transferLeafHash,
+          };
+          if (
+            merged.claimedPulse !== existing.claimedPulse ||
+            merged.childCanonical !== existing.childCanonical ||
+            merged.transferLeafHash !== existing.transferLeafHash
+          ) {
+            map.set(nonce, merged);
+            changed = true;
+          }
         }
       }
-      if (set.size > 0) noteClaimRegistry.set(parentKey, set);
+      if (map.size > 0) noteClaimRegistry.set(parentKey, map);
     }
     return changed;
   } catch {
@@ -154,9 +304,9 @@ function hydrateNoteClaimsFromStorage(): boolean {
 function persistNoteClaimsToStorage(): void {
   if (!canStorage) return;
   try {
-    const obj: Record<string, string[]> = {};
-    for (const [parent, nonces] of noteClaimRegistry.entries()) {
-      const list = Array.from(nonces.values());
+    const obj: Record<string, NoteClaimRecord[]> = {};
+    for (const [parent, claims] of noteClaimRegistry.entries()) {
+      const list = Array.from(claims.values());
       if (list.length > 0) obj[parent] = list;
     }
     localStorage.setItem(NOTE_CLAIM_LS_KEY, JSON.stringify(obj));
@@ -170,35 +320,93 @@ function ensureNoteClaimsHydrated(): void {
   noteClaimsHydrated = true;
   hydrateNoteClaimsFromStorage();
 }
-
 export function markNoteClaimed(
   parentCanonical: string,
   transferNonce: string,
-  args?: { childCanonical?: string },
+  args?: { childCanonical?: string; claimedPulse?: number; transferLeafHash?: string },
 ): boolean {
+  // ✅ hydrate both claims + registry before we operate
   ensureNoteClaimsHydrated();
+  ensureRegistryHydrated?.(); // keep if you have it; safe no-op otherwise
+
   const parentKey = normalizeCanonical(parentCanonical);
   const nonce = normalizeNonce(transferNonce);
   if (!parentKey || !nonce) return false;
-  const set = noteClaimRegistry.get(parentKey) ?? new Set<string>();
-  if (set.has(nonce)) return false;
-  set.add(nonce);
-  noteClaimRegistry.set(parentKey, set);
-  persistNoteClaimsToStorage();
+
+  const claimedPulse =
+    typeof args?.claimedPulse === "number" && Number.isFinite(args.claimedPulse) ? args.claimedPulse : 0;
+
+  const childCanonical = normalizeCanonical(args?.childCanonical);
+  const transferLeafHash = typeof args?.transferLeafHash === "string" ? args.transferLeafHash : undefined;
+
+  // ─────────────────────────────────────────────────────────────
+  // 1) Update claim registry (only if changed)
+  // ─────────────────────────────────────────────────────────────
+  const map = noteClaimRegistry.get(parentKey) ?? new Map<string, NoteClaimRecord>();
+  const existing = map.get(nonce);
+
+  const next: NoteClaimRecord = {
+    nonce,
+    // keep the first non-zero pulse we ever saw, else take new pulse
+    claimedPulse: (existing?.claimedPulse ?? 0) > 0 ? (existing!.claimedPulse as number) : claimedPulse,
+    childCanonical: existing?.childCanonical || childCanonical,
+    transferLeafHash: existing?.transferLeafHash || transferLeafHash,
+  };
+
+  const claimChanged =
+    !existing ||
+    next.claimedPulse !== existing.claimedPulse ||
+    next.childCanonical !== existing.childCanonical ||
+    next.transferLeafHash !== existing.transferLeafHash;
+
+  if (claimChanged) {
+    map.set(nonce, next);
+    noteClaimRegistry.set(parentKey, map);
+    persistNoteClaimsToStorage();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 2) ALWAYS materialize + persist the claim URL into the global registry
+  //    (this is the “infinite generations” fix)
+  // ─────────────────────────────────────────────────────────────
   const claimPayload = buildNoteClaimPayload({
     parentCanonical: parentKey,
     transferNonce: nonce,
-    childCanonical: args?.childCanonical,
+    childCanonical: childCanonical || undefined,
+    claimedPulse: next.claimedPulse || claimedPulse || undefined,
   });
+
   const claimUrl = buildNoteClaimUrl({
     parentCanonical: parentKey,
     transferNonce: nonce,
-    childCanonical: args?.childCanonical,
+    childCanonical: childCanonical || undefined,
+    claimedPulse: next.claimedPulse || claimedPulse || undefined,
   });
+
+  // These are idempotent; call every time so registry repairs itself after cache clears.
   upsertRegistryPayload(claimUrl, claimPayload);
   enqueueInhaleKrystal(claimUrl, claimPayload);
-  return true;
+
+  // ✅ persist registry list EVERY TIME
+  persistRegistryToStorage();
+
+  // Optional: keep modal fallback aligned too
+  if (canStorage) {
+    try {
+      const urls = Array.from(memoryRegistry.keys());
+      localStorage.setItem(MODAL_FALLBACK_LS_KEY, JSON.stringify(urls));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  safeRegistryPost({ type: "note:claim", parentCanonical: parentKey, transferNonce: nonce });
+
+  // return “did something”
+  return claimChanged;
 }
+
+
 
 export function isNoteClaimed(parentCanonical: string, transferNonce: string): boolean {
   ensureNoteClaimsHydrated();
@@ -206,6 +414,33 @@ export function isNoteClaimed(parentCanonical: string, transferNonce: string): b
   const nonce = normalizeNonce(transferNonce);
   if (!parentKey || !nonce) return false;
   return noteClaimRegistry.get(parentKey)?.has(nonce) ?? false;
+}
+
+export function getNoteClaimInfo(parentCanonical: string, transferNonce: string): NoteClaimRecord | null {
+  ensureNoteClaimsHydrated();
+  const parentKey = normalizeCanonical(parentCanonical);
+  const nonce = normalizeNonce(transferNonce);
+  if (!parentKey || !nonce) return null;
+  return noteClaimRegistry.get(parentKey)?.get(nonce) ?? null;
+}
+
+export function getNoteClaimHistory(parentCanonical: string): NoteClaimRecord[] {
+  ensureNoteClaimsHydrated();
+  const parentKey = normalizeCanonical(parentCanonical);
+  if (!parentKey) return [];
+  const map = noteClaimRegistry.get(parentKey);
+  if (!map) return [];
+  return Array.from(map.values()).sort((a, b) => {
+    const at = a.claimedPulse || 0;
+    const bt = b.claimedPulse || 0;
+    if (at !== bt) return bt - at;
+    return a.nonce.localeCompare(b.nonce);
+  });
+}
+
+export function getNoteClaimLeader(parentCanonical: string): NoteClaimRecord | null {
+  const history = getNoteClaimHistory(parentCanonical);
+  return history[0] ?? null;
 }
 
 function safeDecodeURIComponent(v: string): string {
@@ -521,10 +756,26 @@ export function addUrl(url: string, opts?: AddUrlOptions): boolean {
     const parentHash = readStringField(record, "parentHash") ?? readStringField(record, "parentCanonical");
     const nonce = readStringField(record, "transferNonce") ?? readStringField(record, "nonce");
     const childCanonical =
-      readStringField(record, "canonicalHash") ?? readStringField(record, "childHash") ?? readStringField(record, "hash");
+      readStringField(record, "canonicalHash") ??
+      readStringField(record, "childHash") ??
+      readStringField(record, "hash");
+    const transferLeafHash =
+      readStringField(record, "transferLeafHashSend") ??
+      readStringField(record, "transferLeafHashReceive") ??
+      readStringField(record, "leafHash");
+    const claimedPulse =
+      readNumberField(record, "claimedPulse") ??
+      readNumberField(record, "receivePulse") ??
+      readNumberField(record, "pulse") ??
+      0;
+
     if (parentHash && nonce) {
       markConfirmedByNonce(parentHash, nonce);
-      markNoteClaimed(parentHash, nonce, { childCanonical: childCanonical ?? undefined });
+      markNoteClaimed(parentHash, nonce, {
+        childCanonical: childCanonical ?? undefined,
+        transferLeafHash: transferLeafHash ?? undefined,
+        claimedPulse,
+      });
     }
   }
 
@@ -547,7 +798,9 @@ export function addUrl(url: string, opts?: AddUrlOptions): boolean {
 
   if (changed) {
     if (persist) persistRegistryToStorage();
-    if (channel && broadcast) channel.postMessage({ type: "sigil:add", url: abs });
+
+    // ✅ broadcast + mobile-safe invalidation
+    if (broadcast) safeRegistryPost({ type: "sigil:add", url: abs });
 
     if (enqueueToApi) {
       const latest = memoryRegistry.get(abs);
